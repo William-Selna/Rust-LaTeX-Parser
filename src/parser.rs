@@ -161,6 +161,165 @@ fn negate_node(node: EqNode) -> EqNode {
     }
 }
 
+/// What terminates a sequence in [`EqParser::parse_seq`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SeqMode {
+    /// Top level, `{...}` groups and environment cells.
+    Normal,
+    /// The body of `\left ... \right`.
+    UntilRight,
+    /// The inside of a `(...)` argument group: stops at the matching `)`.
+    Paren,
+    /// Like `Paren`, but also splits at top-level commas.
+    ParenArgs,
+}
+
+/// Whether a node can be part of a fraction operand. Operators,
+/// separators, opening brackets and big operators end an operand.
+fn is_operand(node: &EqNode) -> bool {
+    match node {
+        EqNode::Op { .. } | EqNode::Space(_) | EqNode::BigOp { .. } => false,
+        EqNode::Text(t) => !matches!(
+            t.as_str(),
+            "" | "(" | "[" | "{" | "," | ";" | ":" | "|" | "-" | "+" | "\u{00B1}" | "\u{2213}" | "\u{2212}"
+        ),
+        _ => true,
+    }
+}
+
+/// Index of the `(` matching the `)` at `close`, if any.
+fn matching_open(nodes: &[EqNode], close: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for i in (0..=close).rev() {
+        match &nodes[i] {
+            EqNode::Text(t) if t == ")" => depth += 1,
+            EqNode::Text(t) if t == "(" => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Remove and return the numerator for a `/` from the end of `nodes`.
+///
+/// The numerator is the run of adjacent operands before the slash
+/// (`dy/dx`, `2x^2/3`, `n!/k`), where a parenthesized group counts as one
+/// operand (`sin(x)/x`, `2(a+b)/c`). If the whole numerator is a single
+/// `(...)` group, its parentheses are dropped: `(a+b)/(c+d)`.
+///
+/// Also returns whether the numerator was glued to the node before it.
+fn take_numerator(nodes: &mut Vec<EqNode>, glued: &mut Vec<bool>) -> (EqNode, bool) {
+    let Some(last) = nodes.len().checked_sub(1) else {
+        return (EqNode::Text(String::new()), false);
+    };
+    let mut start = last;
+    let is_close = |n: &EqNode| matches!(n, EqNode::Text(t) if t == ")");
+    if is_close(&nodes[last]) {
+        if let Some(open) = matching_open(nodes, last) {
+            start = open;
+        }
+    } else if !is_operand(&nodes[last]) {
+        let node = nodes.pop().unwrap();
+        let g = glued.pop().unwrap_or(false);
+        return (node, g);
+    }
+    let single_group = start != last && start == matching_open(nodes, last).unwrap_or(usize::MAX);
+    while start > 0 && glued.get(start).copied().unwrap_or(false) && is_operand(&nodes[start - 1]) {
+        start -= 1;
+        if is_close(&nodes[start]) {
+            match matching_open(nodes, start) {
+                Some(open) => start = open,
+                None => break,
+            }
+        }
+    }
+    let was_glued = glued.get(start).copied().unwrap_or(false);
+    glued.truncate(start);
+    let mut taken: Vec<EqNode> = nodes.drain(start..).collect();
+    if single_group && matches!(taken.first(), Some(EqNode::Text(t)) if t == "(") && matching_open(&taken, taken.len() - 1) == Some(0) {
+        taken.pop();
+        taken.remove(0);
+    }
+    (finish_nodes(taken), was_glued)
+}
+
+/// Join comma-separated argument parts back together with `,` text.
+fn join_parts(parts: Vec<EqNode>) -> EqNode {
+    let mut out = Vec::new();
+    for (i, part) in parts.into_iter().enumerate() {
+        if i > 0 {
+            out.push(EqNode::Text(",".to_string()));
+        }
+        match part {
+            EqNode::Seq(v) => out.extend(v),
+            EqNode::Text(t) if t.is_empty() => {}
+            other => out.push(other),
+        }
+    }
+    finish_nodes(out)
+}
+
+/// A Unicode superscript or subscript character, as `(is_superscript, plain char)`.
+fn unicode_script(c: char) -> Option<(bool, char)> {
+    const SUP: &[(char, char)] = &[
+        ('⁰', '0'), ('¹', '1'), ('²', '2'), ('³', '3'), ('⁴', '4'), ('⁵', '5'), ('⁶', '6'),
+        ('⁷', '7'), ('⁸', '8'), ('⁹', '9'), ('⁺', '+'), ('⁻', '-'), ('⁼', '='), ('⁽', '('),
+        ('⁾', ')'), ('ⁿ', 'n'), ('ⁱ', 'i'),
+    ];
+    const SUB: &[(char, char)] = &[
+        ('₀', '0'), ('₁', '1'), ('₂', '2'), ('₃', '3'), ('₄', '4'), ('₅', '5'), ('₆', '6'),
+        ('₇', '7'), ('₈', '8'), ('₉', '9'), ('₊', '+'), ('₋', '-'), ('₌', '='), ('₍', '('),
+        ('₎', ')'), ('ₐ', 'a'), ('ₑ', 'e'), ('ₒ', 'o'), ('ₓ', 'x'), ('ₕ', 'h'), ('ₖ', 'k'),
+        ('ₗ', 'l'), ('ₘ', 'm'), ('ₙ', 'n'), ('ₚ', 'p'), ('ₛ', 's'), ('ₜ', 't'), ('ᵢ', 'i'),
+        ('ⱼ', 'j'), ('ᵣ', 'r'), ('ᵤ', 'u'), ('ᵥ', 'v'),
+    ];
+    SUP.iter().find(|(u, _)| *u == c).map(|(_, p)| (true, *p))
+        .or_else(|| SUB.iter().find(|(u, _)| *u == c).map(|(_, p)| (false, *p)))
+}
+
+/// A Unicode vulgar fraction character like `½`, as `(numerator, denominator)`.
+fn vulgar_fraction(c: char) -> Option<(&'static str, &'static str)> {
+    Some(match c {
+        '½' => ("1", "2"), '⅓' => ("1", "3"), '⅔' => ("2", "3"), '¼' => ("1", "4"),
+        '¾' => ("3", "4"), '⅕' => ("1", "5"), '⅖' => ("2", "5"), '⅗' => ("3", "5"),
+        '⅘' => ("4", "5"), '⅙' => ("1", "6"), '⅚' => ("5", "6"), '⅐' => ("1", "7"),
+        '⅛' => ("1", "8"), '⅜' => ("3", "8"), '⅝' => ("5", "8"), '⅞' => ("7", "8"),
+        '⅑' => ("1", "9"), '⅒' => ("1", "10"),
+        _ => return None,
+    })
+}
+
+/// The command name for a typed big-operator character like `∑`.
+fn big_op_for_char(c: char) -> Option<&'static str> {
+    BIG_OP_COMMANDS.iter().copied().find(|name| big_op_symbol(name).starts_with(c))
+}
+
+/// ASCII shortcuts for people who don't know LaTeX. Only sequences with no
+/// sensible LaTeX reading are included (`<=` would be "less than, equals"
+/// in LaTeX); ambiguous ones like `!=` (`n! = 1`) and `<-` (`x < -1`) are
+/// left to LaTeX.
+const ASCII_SHORTCUTS: &[(&str, &str)] = &[
+    ("<=>", "\u{21D4}"), // ⇔
+    ("<->", "\u{2194}"), // ↔
+    ("+/-", "\u{00B1}"), // ±
+    ("<=", "\u{2264}"),  // ≤
+    (">=", "\u{2265}"),  // ≥
+    ("->", "\u{2192}"),  // →
+    ("=>", "\u{21D2}"),  // ⇒
+];
+
+/// Function-style shortcuts that take a parenthesized argument list, like
+/// `abs(x)` or `root(3, x)`. They only apply when `(` follows immediately.
+const FUNCTION_WORDS: &[&str] = &[
+    "abs", "norm", "floor", "ceil", "cbrt", "root", "binom", "text",
+    "hat", "bar", "vec", "dot", "ddot", "tilde", "ul",
+];
+
 /// Collapse a node list into a single node.
 fn finish_nodes(mut nodes: Vec<EqNode>) -> EqNode {
     match nodes.len() {
@@ -408,19 +567,20 @@ impl EqParser {
     }
 
     fn parse_sequence(&mut self) -> EqNode {
-        self.parse_sequence_until(false)
+        self.parse_sequence_until_right(false)
     }
 
-    fn parse_sequence_until(&mut self, stop_on_paren: bool) -> EqNode {
-        self.parse_sequence_until_ex(stop_on_paren, false)
+    /// Parse a sequence, optionally stopping at `\right` (for `\left...\right`).
+    fn parse_sequence_until_right(&mut self, stop_on_right: bool) -> EqNode {
+        let mode = if stop_on_right { SeqMode::UntilRight } else { SeqMode::Normal };
+        self.parse_seq(mode).remove(0)
     }
 
     /// Whether the current position terminates the sequence being parsed.
-    fn at_sequence_stop(&self, stop_on_paren: bool, stop_on_right: bool) -> bool {
+    fn at_sequence_stop(&self, stop_on_right: bool) -> bool {
         match self.peek() {
             None => true,
             Some('}') => self.in_group,
-            Some(')') => stop_on_paren,
             Some('&') => self.in_env,
             Some('\\') => {
                 (self.in_env && (self.is_row_separator() || self.lookahead_command("end")))
@@ -430,30 +590,65 @@ impl EqParser {
         }
     }
 
-    fn parse_sequence_until_ex(&mut self, stop_on_paren: bool, stop_on_right: bool) -> EqNode {
-        let mut nodes = Vec::new();
+    /// The core sequence loop shared by top-level input, `{...}` groups,
+    /// environment cells, `\left...\right` bodies and `(...)` argument groups.
+    ///
+    /// Returns one node per comma-separated part in [`SeqMode::ParenArgs`]
+    /// mode, and exactly one node otherwise.
+    fn parse_seq(&mut self, mode: SeqMode) -> Vec<EqNode> {
+        let in_parens = matches!(mode, SeqMode::Paren | SeqMode::ParenArgs);
+        let stop_on_right = matches!(mode, SeqMode::UntilRight);
+        let mut parts = Vec::new();
+        let mut nodes: Vec<EqNode> = Vec::new();
+        // glued[i]: no whitespace between nodes[i - 1] and nodes[i].
+        let mut glued: Vec<bool> = Vec::new();
+        let mut after_space = false;
+        let mut depth = 0usize;
         while let Some(ch) = self.peek() {
             if ch == '%' {
                 self.skip_comment();
                 continue;
             }
-            if self.at_sequence_stop(stop_on_paren, stop_on_right) {
+            if in_parens {
+                match ch {
+                    ')' if depth == 0 => break,
+                    ')' | '(' => {
+                        if ch == '(' { depth += 1 } else { depth -= 1 }
+                        self.advance();
+                        nodes.push(EqNode::Text(ch.to_string()));
+                        glued.push(!after_space);
+                        after_space = false;
+                        continue;
+                    }
+                    ',' if depth == 0 && mode == SeqMode::ParenArgs => {
+                        self.advance();
+                        parts.push(finish_nodes(std::mem::take(&mut nodes)));
+                        glued.clear();
+                        after_space = false;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if self.at_sequence_stop(stop_on_right) {
                 break;
             }
             if ch.is_whitespace() {
                 self.skip_whitespace();
+                after_space = true;
                 continue;
             }
             if self.skip_noop_command() {
+                after_space = true;
                 continue;
             }
-            if ch == '\\' {
+            if ch == '\\' && !in_parens {
                 // \color{c} is a switch: it colors the rest of the current group.
                 if self.lookahead_command("color") {
                     self.pos += "\\color".len();
                     self.skip_whitespace();
                     let color = self.parse_brace_arg_opt().unwrap_or_default();
-                    let rest = self.parse_sequence_until_ex(stop_on_paren, stop_on_right);
+                    let rest = self.parse_seq(mode).remove(0);
                     nodes.push(EqNode::Color {
                         color: color.trim().to_string(),
                         content: Box::new(rest),
@@ -472,7 +667,7 @@ impl EqParser {
                 if let Some(cmd) = infix {
                     self.pos += 1 + cmd.len();
                     let top = finish_nodes(std::mem::take(&mut nodes));
-                    let bottom = self.parse_sequence_until_ex(stop_on_paren, stop_on_right);
+                    let bottom = self.parse_seq(mode).remove(0);
                     nodes.push(if cmd == "over" {
                         EqNode::Frac(Box::new(top), Box::new(bottom))
                     } else {
@@ -483,18 +678,55 @@ impl EqParser {
             }
             if ch == '/' {
                 self.advance();
-                // Turn last node into fraction numerator
-                let numer = if let Some(n) = nodes.pop() { n } else { EqNode::Text(String::new()) };
-                let denom = self.parse_group_atom();
-                let denom = self.parse_postfix(denom);
+                let (numer, numer_glued) = take_numerator(&mut nodes, &mut glued);
+                let denom = self.parse_denominator();
                 nodes.push(EqNode::Frac(Box::new(numer), Box::new(denom)));
+                glued.push(numer_glued && !after_space);
+                after_space = false;
                 continue;
             }
             let atom = self.parse_atom();
             let node = self.parse_postfix(atom);
             push_node(&mut nodes, node);
+            glued.push(!after_space);
+            after_space = false;
         }
-        finish_nodes(nodes)
+        parts.push(finish_nodes(nodes));
+        parts
+    }
+
+    /// Parse the denominator after `/`: a `(...)` group (parentheses
+    /// dropped), or a run of adjacent letters, digits and symbols, so that
+    /// `dy/dx` is `dy` over `dx`. Whitespace ends the run: `1/2 x` is
+    /// one half times x.
+    fn parse_denominator(&mut self) -> EqNode {
+        self.skip_whitespace();
+        if self.peek() == Some('(') {
+            let group = self.parse_group_atom();
+            return self.parse_postfix(group);
+        }
+        let first = self.parse_atom();
+        let mut parts = vec![self.parse_postfix(first)];
+        while self.continues_run() {
+            let atom = self.parse_atom();
+            let node = self.parse_postfix(atom);
+            parts.push(node);
+        }
+        finish_nodes(parts)
+    }
+
+    /// Whether the next token continues a run of adjacent operands
+    /// (a letter, digit, or symbol command like `\alpha`).
+    fn continues_run(&self) -> bool {
+        match self.peek() {
+            Some(c) if c.is_alphanumeric() && unicode_script(c).is_none() && vulgar_fraction(c).is_none() => true,
+            Some('!') => true, // factorial: n!/k!
+            Some('\\') => self
+                .peek_command_name()
+                .and_then(|name| latex_to_unicode(&name))
+                .is_some_and(|sym| op_kind(&sym).is_none()),
+            _ => false,
+        }
     }
 
     /// Check if the next two chars are `\\` (row separator in matrices/cases).
@@ -529,48 +761,31 @@ impl EqParser {
     }
 
     /// Parse an atom that treats `(...)` as invisible grouping (no parens shown).
-    /// Used by sqrt, frac, and other constructs that take arguments.
-    /// Tracks paren nesting so `((3x+3))` correctly distinguishes inner visible parens from grouping parens.
+    /// Used by sqrt, frac, scripts and other constructs that take arguments.
+    /// Inner parentheses stay visible: `((3x+3))` keeps one pair.
     fn parse_group_atom(&mut self) -> EqNode {
         self.skip_whitespace();
         if self.peek() == Some('(') {
             self.advance();
-            // Parse content, but track nested parens so we only stop
-            // on the `)` that matches our opening `(`
-            let mut nodes = Vec::new();
-            let mut depth = 0i32;
-            while let Some(ch) = self.peek() {
-                match ch {
-                    ')' if depth == 0 => break,
-                    ')' => {
-                        depth -= 1;
-                        self.advance();
-                        nodes.push(EqNode::Text(")".into()));
-                    }
-                    '(' => {
-                        depth += 1;
-                        self.advance();
-                        nodes.push(EqNode::Text("(".into()));
-                    }
-                    '%' => self.skip_comment(),
-                    _ if self.at_sequence_stop(false, false) => break,
-                    c if c.is_whitespace() => self.skip_whitespace(),
-                    _ => {
-                        if self.skip_noop_command() {
-                            continue;
-                        }
-                        let atom = self.parse_atom();
-                        let node = self.parse_postfix(atom);
-                        push_node(&mut nodes, node);
-                    }
-                }
-            }
+            let inner = self.parse_seq(SeqMode::Paren).remove(0);
             if self.peek() == Some(')') {
                 self.advance();
             }
-            return finish_nodes(nodes);
+            return inner;
         }
         self.parse_atom()
+    }
+
+    /// Parse `( ... )` and split the contents at top-level commas, for
+    /// function-style input like `root(3, x)` or `binom(n, k)`.
+    /// Assumes the current char is `(`.
+    fn parse_paren_args(&mut self) -> Vec<EqNode> {
+        self.advance(); // '('
+        let parts = self.parse_seq(SeqMode::ParenArgs);
+        if self.peek() == Some(')') {
+            self.advance();
+        }
+        parts
     }
 
     /// Parse a `{...}` group as an isolated sequence. Inside braces, `&` and
@@ -623,10 +838,119 @@ impl EqParser {
         }
     }
 
-    /// Parse the argument of a `^` or `_`.
+    /// Parse the argument of a `^` or `_`. A parenthesized group is taken
+    /// whole, with the parentheses dropped: `x^(n+1)`, `sum_(i=1)^n`.
     fn parse_script_arg(&mut self) -> EqNode {
         self.skip_whitespace_and_comments();
+        if self.peek() == Some('(') {
+            return self.parse_group_atom();
+        }
         self.parse_atom()
+    }
+
+    /// The operand of a typed `√`: a `(...)` group or a single atom with
+    /// its scripts (`√x²` is the root of x²).
+    fn parse_root_operand(&mut self) -> EqNode {
+        let atom = self.parse_group_atom();
+        self.parse_postfix(atom)
+    }
+
+    /// An ASCII shortcut like `<=` or `->` at the current position, as
+    /// `(length, symbol)`.
+    fn peek_ascii_shortcut(&self) -> Option<(usize, &'static str)> {
+        ASCII_SHORTCUTS.iter().find_map(|(ascii, symbol)| {
+            let len = ascii.len();
+            let matches = self.chars.len() >= self.pos + len
+                && ascii.chars().zip(&self.chars[self.pos..]).all(|(a, b)| a == *b);
+            matches.then_some((len, *symbol))
+        })
+    }
+
+    /// `"quoted text"` is upright text, like `\text{...}`. An unclosed quote
+    /// runs to the end of the input, so half-typed text still previews.
+    fn parse_quoted_text(&mut self) -> EqNode {
+        self.advance(); // opening quote
+        let mut text = String::new();
+        while let Some(c) = self.advance() {
+            if c == '"' {
+                break;
+            }
+            text.push(c);
+        }
+        EqNode::TextBlock(text)
+    }
+
+    /// Match a function-style shortcut word, but only if `(` follows
+    /// immediately (so `abs` on its own is still three letters).
+    fn try_function_word(&mut self, kw: &str) -> bool {
+        let len = kw.chars().count();
+        let followed_by_paren = self.chars.get(self.pos + len) == Some(&'(');
+        followed_by_paren && self.try_keyword(kw)
+    }
+
+    /// Build the node for a function-style shortcut. The current char is `(`.
+    fn parse_function_word(&mut self, kw: &str) -> EqNode {
+        if kw == "text" {
+            // Raw text up to the matching `)`.
+            self.advance();
+            let mut depth = 0;
+            let mut text = String::new();
+            while let Some(c) = self.advance() {
+                match c {
+                    '(' => depth += 1,
+                    ')' if depth == 0 => break,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                text.push(c);
+            }
+            return EqNode::TextBlock(text);
+        }
+        let mut args = self.parse_paren_args();
+        let delimited = |l: &str, r: &str, content: EqNode| EqNode::Delimited {
+            left: l.to_string(),
+            right: r.to_string(),
+            content: Box::new(content),
+        };
+        match kw {
+            "root" if args.len() >= 2 => {
+                let index = args.remove(0);
+                let rest = join_parts(args);
+                EqNode::Root { index: Box::new(index), content: Box::new(rest) }
+            }
+            "binom" if args.len() >= 2 => {
+                let top = args.remove(0);
+                let bottom = join_parts(args);
+                EqNode::Binom(Box::new(top), Box::new(bottom))
+            }
+            _ => {
+                let content = join_parts(args);
+                match kw {
+                    "abs" => delimited("|", "|", content),
+                    "norm" => delimited("\u{2016}", "\u{2016}", content),
+                    "floor" => delimited("\u{230A}", "\u{230B}", content),
+                    "ceil" => delimited("\u{2308}", "\u{2309}", content),
+                    "cbrt" => EqNode::Root {
+                        index: Box::new(EqNode::Text("3".to_string())),
+                        content: Box::new(content),
+                    },
+                    "root" => EqNode::Sqrt(Box::new(content)),
+                    "binom" => EqNode::Binom(Box::new(content), Box::new(EqNode::Text(String::new()))),
+                    _ => {
+                        let kind = match kw {
+                            "hat" => AccentKind::Hat,
+                            "bar" => AccentKind::Bar,
+                            "vec" => AccentKind::Vec,
+                            "dot" => AccentKind::Dot,
+                            "ddot" => AccentKind::DoubleDot,
+                            "tilde" => AccentKind::Tilde,
+                            _ => AccentKind::Underline,
+                        };
+                        EqNode::Accent(Box::new(content), kind)
+                    }
+                }
+            }
+        }
     }
 
     /// Collect `^upper` / `_lower` limits after a big operator, skipping
@@ -706,6 +1030,12 @@ impl EqParser {
                 if self.try_keyword("sqrt") {
                     return self.parse_root();
                 }
+                // Function-style shortcuts: abs(x), root(3, x), text(if), ...
+                for &kw in FUNCTION_WORDS {
+                    if self.try_function_word(kw) {
+                        return self.parse_function_word(kw);
+                    }
+                }
                 // Try bare-word big operators (int, sum, prod, etc.)
                 for &kw in BIG_OP_COMMANDS {
                     if self.try_keyword(kw) {
@@ -760,6 +1090,35 @@ impl EqParser {
                 self.advance();
                 symbol_node("\u{00B7}".to_string())
             }
+            Some('"') => self.parse_quoted_text(),
+            Some('\u{221A}') => {
+                // √x, √(x+1)
+                self.advance();
+                EqNode::Sqrt(Box::new(self.parse_root_operand()))
+            }
+            Some(c @ ('\u{221B}' | '\u{221C}')) => {
+                // ∛x, ∜x
+                self.advance();
+                let index = if c == '\u{221B}' { "3" } else { "4" };
+                EqNode::Root {
+                    index: Box::new(EqNode::Text(index.to_string())),
+                    content: Box::new(self.parse_root_operand()),
+                }
+            }
+            Some(c) if vulgar_fraction(c).is_some() => {
+                self.advance();
+                let (n, d) = vulgar_fraction(c).unwrap();
+                EqNode::Frac(Box::new(EqNode::Text(n.to_string())), Box::new(EqNode::Text(d.to_string())))
+            }
+            Some(c) if big_op_for_char(c).is_some() => {
+                self.advance();
+                self.big_op(big_op_for_char(c).unwrap())
+            }
+            Some(_) if self.peek_ascii_shortcut().is_some() => {
+                let (len, symbol) = self.peek_ascii_shortcut().unwrap();
+                self.pos += len;
+                symbol_node(symbol.to_string())
+            }
             Some(ch) => {
                 // Operators (`+ - = < >` and typed Unicode like `≤`) become
                 // Op nodes; everything else is text.
@@ -777,6 +1136,34 @@ impl EqParser {
         let mut primes = 0usize;
 
         loop {
+            if let Some((count, _)) = self.peek().and_then(|c| match c {
+                '\u{2032}' => Some((1, c)),
+                '\u{2033}' => Some((2, c)),
+                '\u{2034}' => Some((3, c)),
+                _ => None,
+            }) {
+                // Typed prime characters: x′, f″
+                self.advance();
+                primes += count;
+                continue;
+            }
+            if let Some((is_sup, _)) = self.peek().and_then(unicode_script) {
+                // Typed Unicode scripts: x², a₁, eⁱⁿ
+                let slot = if is_sup { &sup } else { &sub };
+                if slot.is_none() {
+                    let mut plain = String::new();
+                    while let Some((s2, p)) = self.peek().and_then(unicode_script) {
+                        if s2 != is_sup {
+                            break;
+                        }
+                        plain.push(p);
+                        self.advance();
+                    }
+                    let node = parse_equation(&plain);
+                    if is_sup { sup = Some(node) } else { sub = Some(node) }
+                    continue;
+                }
+            }
             match self.peek_past_whitespace() {
                 Some('\'') if self.peek() == Some('\'') => {
                     self.advance();
@@ -840,20 +1227,22 @@ impl EqParser {
         // Sorted longest-first so we match "epsilon" before "eta", "theta" before "the", etc.
         static BAREWORDS: &[&str] = &[
             "varepsilon", "rightarrow", "leftarrow", "Rightarrow", "Leftarrow",
-            "epsilon", "upsilon", "omicron", "lambda", "Lambda", "implies",
-            "partial", "emptyset",
+            "subseteq", "supseteq", "vartheta", "varsigma", "infinity",
+            "epsilon", "upsilon", "omicron", "lambda", "Lambda", "implies", "Upsilon",
+            "partial", "emptyset", "varphi", "varrho", "subset", "supset",
             "alpha", "beta", "gamma", "delta", "theta", "kappa", "sigma",
-            "omega", "Gamma", "Delta", "Theta", "Sigma", "Omega",
-            "infty", "nabla", "forall", "exists", "approx", "equiv",
-            "times", "cdot",
-            "zeta", "iota", "pi", "rho", "tau", "phi", "chi", "psi",
-            "eta", "nu", "xi", "mu", "Pi", "Phi", "Psi",
+            "omega", "Gamma", "Delta", "Theta", "Sigma", "Omega", "varpi",
+            "infty", "nabla", "forall", "exists", "approx", "equiv", "notin",
+            "times", "cdots", "ldots",
+            "cdot", "zeta", "iota", "neq", "leq", "geq",
+            "pi", "rho", "tau", "phi", "chi", "psi",
+            "eta", "nu", "xi", "mu", "Pi", "Phi", "Psi", "Xi",
             "pm",
         ];
         for &word in BAREWORDS {
             if self.try_keyword(word) {
-                let symbol = latex_to_unicode(word)
-                    .unwrap_or_else(|| word.to_string());
+                let name = if word == "infinity" { "infty" } else { word };
+                let symbol = latex_to_unicode(name).unwrap_or_else(|| word.to_string());
                 return Some(symbol_node(symbol));
             }
         }
@@ -1127,7 +1516,7 @@ impl EqParser {
                 return EqNode::Enclose { kind, content: Box::new(content) };
             }
 
-            // Color. \color as a switch is handled in parse_sequence_until_ex;
+            // Color. \color as a switch is handled in parse_seq;
             // here it only applies to the following atom.
             "textcolor" | "color" => {
                 let color = self.parse_brace_arg_opt().unwrap_or_default();
@@ -1315,7 +1704,7 @@ impl EqParser {
         // group, so `&` and `\\` inside it are not environment separators.
         let saved_env = self.in_env;
         self.in_env = false;
-        let content = self.parse_sequence_until_ex(false, true);
+        let content = self.parse_sequence_until_right(true);
         self.in_env = saved_env;
 
         // Consume \right and its delimiter
@@ -1486,7 +1875,7 @@ impl EqParser {
         loop {
             let mut row = Vec::new();
             loop {
-                row.push(self.parse_sequence_until_ex(false, false));
+                row.push(self.parse_sequence());
                 if self.peek() == Some('&') {
                     self.advance();
                     continue;

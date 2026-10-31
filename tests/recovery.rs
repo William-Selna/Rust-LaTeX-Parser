@@ -141,7 +141,8 @@ impl Lcg {
 /// Fragments that exercise every recovery path. Content characters are
 /// limited to `xyz123` so they can't accidentally combine into a bareword
 /// like `pi` or a dimension like `1em`. Fragments starting with `\` are
-/// commands; any of those letters inside them aren't counted as content.
+/// commands; any of those letters inside them aren't counted as content
+/// (and likewise for function words like `text(`).
 const FRAGMENTS: &[&str] = &[
     "x", "y", "z", "1", "2", "3", "x", "y", "12", " ", "  ",
     "{", "}", "}", "&", "&", "\\\\", "(", ")", "[", "]", "^", "_", "'", "+", "-", "/", "=",
@@ -154,6 +155,8 @@ const FRAGMENTS: &[&str] = &[
     "\\substack{", "\\operatorname{", "\\text{", "\\boxed", "\\hat", "\\mathbb",
     "\\sum", "\\int", "\\lim", "\\limits", "\\displaystyle", "\\binom", "\\overbrace",
     "\\underbrace", "\\xrightarrow", "\\alpha", "\\in", "\\,", "\\",
+    // Natural-input forms
+    "<=", "->", "=>", "+/-", "abs(", "root(", "text(", "hat(", "\"", ",", "√", "∛", "²", "₁", "½", "′", "∑",
 ];
 
 fn content_counts(s: &str) -> [usize; 6] {
@@ -176,7 +179,9 @@ fn random_inputs_never_drop_content() {
         let tree = parse_equation(&input);
         // Only count content we inserted, not letters inside command or
         // environment names (e.g. the `x` in `pmatrix`).
-        let content: String = fragments.iter().filter(|f| !f.starts_with('\\')).copied().collect();
+        // Function-style words like `text(` are syntax too.
+        let is_syntax = |f: &&str| f.starts_with('\\') || (f.len() > 1 && f.ends_with('('));
+        let content: String = fragments.iter().filter(|f| !is_syntax(f)).copied().collect();
         let expected = content_counts(&content);
         let actual = content_counts(&all_text(&tree));
         for i in 0..6 {
