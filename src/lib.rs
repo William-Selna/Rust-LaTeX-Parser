@@ -32,27 +32,33 @@
 //! | Category | Examples |
 //! |----------|---------|
 //! | Superscripts / subscripts | `x^2`, `x_{i+1}`, `x^2_3` |
-//! | Fractions | `a/b`, `\frac{a}{b}` |
+//! | Fractions | `a/b`, `\frac{a}{b}`, `\dfrac{a}{b}`, `{a \over b}` |
 //! | Square roots | `sqrt(x)`, `\sqrt{x}` |
 //! | Greek letters | `pi`, `\alpha`, `\Omega` |
-//! | Big operators | `\sum_{i=0}^{n}`, `int_0^1`, `\prod` |
-//! | Limit operators | `lim_{x \to 0}`, `sin`, `log_2` |
-//! | Accents | `\hat{x}`, `\bar{x}`, `\vec{v}` |
+//! | Big operators | `\sum_{i=0}^{n}`, `int_0^1`, `\prod`, `\bigcup`, `\sum\limits_{i}` |
+//! | Limit operators | `lim_{x \to 0}`, `sin`, `log_2`, `\operatorname{rank}` |
+//! | Accents | `\hat{x}`, `\bar{x}`, `\vec{v}`, `\widehat{xy}` |
 //! | Matrices | `\begin{pmatrix} a & b \\\\ c & d \end{pmatrix}` |
 //! | Cases | `\begin{cases} x & x>0 \\\\ 0 & x=0 \end{cases}` |
-//! | Delimiters | `\left( ... \right)` |
-//! | Math fonts | `\mathbb{R}`, `\mathcal{F}`, `\mathbf{v}` |
-//! | Binomials | `\binom{n}{k}` |
+//! | Delimiters | `\left( ... \right)`, `\left\{ ... \middle\| ... \right\}` |
+//! | Math fonts | `\mathbb{R}`, `\mathcal{F}`, `\mathbf{v}`, `\textbf{...}` |
+//! | Binomials | `\binom{n}{k}`, `{n \choose k}` |
 //! | Braces | `\overbrace{a+b}^{n}`, `\underbrace{...}_{text}` |
-//! | Stacked | `\overset{def}{=}`, `\underset{lim}{=}` |
-//! | 130+ symbols | `\pm`, `\leq`, `\in`, `\rightarrow`, `\infty`, ... |
+//! | Stacked | `\overset{def}{=}`, `\underset{lim}{=}`, `\xrightarrow[a]{b}` |
+//! | Negation | `\not\in`, `\not=` |
+//! | Spacing | `\,`, `\quad`, `\hspace{1em}`, `\mkern3mu` |
+//! | 270+ symbols | `\pm`, `\leq`, `\in`, `\rightarrow`, `\infty`, `\mid`, ... |
 //!
 //! # Error handling
 //!
-//! The parser never fails. Malformed input produces a best-effort tree:
-//! unmatched braces get ignored, unknown commands become literal text nodes,
-//! and so on. This is intentional — it keeps live-preview editors responsive
-//! while the user is still typing.
+//! The parser never fails. Malformed input produces a best-effort tree, and
+//! no input is silently dropped: unknown commands and environments, and stray
+//! `}`, `&`, `\\` or `\end{...}`, become literal text nodes and parsing
+//! continues after them. This is intentional — it keeps live-preview editors
+//! responsive while the user is still typing.
+//!
+//! The only things discarded are presentational commands with no visible
+//! output, like `\displaystyle`, `\limits` and `\label{...}`.
 
 pub mod ast;
 pub mod parser;

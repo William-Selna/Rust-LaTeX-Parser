@@ -6,13 +6,55 @@
 //! The parser is a hand-written recursive descent parser over a `Vec<char>`.
 //! It never fails — malformed input produces a best-effort tree rather than
 //! an error. This keeps live-preview editors responsive while the user types.
+//!
+//! # Recovery rules
+//!
+//! Structural tokens only act as terminators where they make sense:
+//!
+//! - `}` closes a `{` group. Outside any group it is kept as literal text.
+//! - `&`, `\\` and `\end{...}` end a cell/row/environment only inside an
+//!   environment body. Elsewhere they are kept as literal text.
+//! - `\right` closes the nearest `\left`. A stray `\right` is kept as text.
+//!
+//! Every character of the input therefore ends up somewhere in the tree,
+//! except for row spacing hints like `\\[2pt]` and purely presentational
+//! commands with no visible output (`\displaystyle`, `\limits`,
+//! `\nonumber`, `\label{...}`, ...).
 
 use crate::ast::*;
 
 /// Space (in points) inserted on each side of binary operators like `+`, `=`, `\leq`.
 const OP_SPACE: f32 = 4.0;
 
-pub const BIG_OP_COMMANDS: &[&str] = &["sum", "prod", "int", "iint", "iiint", "oint", "coprod"];
+/// Width of `\quad` (1em). Other units are scaled relative to this.
+const EM: f32 = 18.0;
+
+pub const BIG_OP_COMMANDS: &[&str] = &[
+    "sum", "prod", "int", "iint", "iiint", "oint", "coprod",
+    "iiiint", "oiint", "oiiint",
+    "bigcup", "bigcap", "bigoplus", "bigotimes", "bigodot", "biguplus",
+    "bigsqcup", "bigvee", "bigwedge",
+];
+
+/// Commands that only affect presentation and have no visible output of
+/// their own. They are consumed without producing a node.
+const NOOP_COMMANDS: &[&str] = &[
+    "displaystyle", "textstyle", "scriptstyle", "scriptscriptstyle",
+    "limits", "nolimits", "displaylimits",
+    "nonumber", "notag", "label", "hline",
+    "nobreak", "allowbreak",
+];
+
+/// Named limit-style operators (`\lim`, `\sin`, ...), rendered upright.
+const LIMIT_OPS: &[&str] = &[
+    "lim", "liminf", "limsup",
+    "min", "max", "sup", "inf",
+    "log", "lg", "ln", "exp",
+    "sin", "cos", "tan", "cot", "sec", "csc",
+    "arcsin", "arccos", "arctan",
+    "sinh", "cosh", "tanh", "coth",
+    "det", "dim", "ker", "deg", "gcd", "hom", "arg", "Pr",
+];
 
 /// Characters that are relation or binary operators and should get OP_SPACE on each side.
 fn is_spaced_operator(ch: char) -> bool {
@@ -22,7 +64,20 @@ fn is_spaced_operator(ch: char) -> bool {
         '\u{2192}' | '\u{2190}' | '\u{2194}' | '\u{21D2}' | '\u{21D0}' | '\u{21D4}' | // → ← ↔ ⇒ ⇐ ⇔
         '\u{227A}' | '\u{227B}' | '\u{223C}' | '\u{2245}' | '\u{226A}' | '\u{226B}' | // ≺ ≻ ∼ ≅ ≪ ≫
         '\u{221D}' | // ∝
-        '\u{00B1}' | '\u{2213}' | '\u{00D7}' | '\u{00F7}' // ± ∓ × ÷
+        '\u{00B1}' | '\u{2213}' | '\u{00D7}' | '\u{00F7}' | // ± ∓ × ÷
+        // Negated and additional relations. (Symbols that were already
+        // supported keep their existing spacing.)
+        '\u{220C}' | '\u{2223}' | '\u{2224}' | '\u{2226}' | // ∌ ∣ ∤ ∦
+        '\u{2270}' | '\u{2271}' | '\u{2A7D}' | '\u{2A7E}' | '\u{226E}' | '\u{226F}' | // ≰ ≱ ⩽ ⩾ ≮ ≯
+        '\u{228A}' | '\u{228B}' | '\u{2284}' | '\u{2285}' | '\u{2288}' | '\u{2289}' | // ⊊ ⊋ ⊄ ⊅ ⊈ ⊉
+        '\u{2262}' | '\u{2249}' | '\u{2247}' | '\u{2241}' | '\u{2244}' | // ≢ ≉ ≇ ≁ ≄
+        '\u{2280}' | '\u{2281}' | '\u{2291}' | '\u{2292}' | '\u{2272}' | '\u{2273}' | // ⊀ ⊁ ⊑ ⊒ ≲ ≳
+        '\u{2254}' | '\u{2250}' | '\u{224D}' | '\u{22A2}' | '\u{22A3}' | '\u{22A8}' | // ≔ ≐ ≍ ⊢ ⊣ ⊨
+        // Additional arrows
+        '\u{27F5}' | '\u{27F6}' | '\u{27F7}' | '\u{27F8}' | '\u{27F9}' | '\u{27FA}' | // ⟵ ⟶ ⟷ ⟸ ⟹ ⟺
+        '\u{27FC}' | '\u{21CC}' | // ⟼ ⇌
+        '\u{219A}' | '\u{219B}' | '\u{21AE}' | '\u{21CD}' | '\u{21CE}' | '\u{21CF}' | // ↚ ↛ ↮ ⇍ ⇎ ⇏
+        '\u{2197}' | '\u{2198}' | '\u{2196}' | '\u{2199}' // ↗ ↘ ↖ ↙
     )
 }
 
@@ -52,16 +107,163 @@ pub fn big_op_symbol(name: &str) -> &'static str {
         "int" => "\u{222B}",
         "iint" => "\u{222C}",
         "iiint" => "\u{222D}",
+        "iiiint" => "\u{2A0C}",
         "oint" => "\u{222E}",
+        "oiint" => "\u{222F}",
+        "oiiint" => "\u{2230}",
+        "bigcup" => "\u{22C3}",
+        "bigcap" => "\u{22C2}",
+        "bigoplus" => "\u{2A01}",
+        "bigotimes" => "\u{2A02}",
+        "bigodot" => "\u{2A00}",
+        "biguplus" => "\u{2A04}",
+        "bigsqcup" => "\u{2A06}",
+        "bigvee" => "\u{22C1}",
+        "bigwedge" => "\u{22C0}",
         _ => "\u{2211}",
     }
+}
+
+/// The negated form of a relation symbol, as produced by `\not`.
+fn negate_symbol(s: &str) -> String {
+    let mut chars = s.chars();
+    let (Some(ch), None) = (chars.next(), chars.next()) else {
+        return format!("{}\u{0338}", s);
+    };
+    let negated = match ch {
+        '=' => '\u{2260}',
+        '<' => '\u{226E}',
+        '>' => '\u{226F}',
+        '|' | '\u{2223}' => '\u{2224}',
+        '\u{2208}' => '\u{2209}',
+        '\u{220B}' => '\u{220C}',
+        '\u{2261}' => '\u{2262}',
+        '\u{2282}' => '\u{2284}',
+        '\u{2283}' => '\u{2285}',
+        '\u{2286}' => '\u{2288}',
+        '\u{2287}' => '\u{2289}',
+        '\u{2203}' => '\u{2204}',
+        '\u{2264}' => '\u{2270}',
+        '\u{2265}' => '\u{2271}',
+        '\u{223C}' => '\u{2241}',
+        '\u{2243}' => '\u{2244}',
+        '\u{2248}' => '\u{2249}',
+        '\u{2245}' => '\u{2247}',
+        '\u{2225}' => '\u{2226}',
+        '\u{227A}' => '\u{2280}',
+        '\u{227B}' => '\u{2281}',
+        '\u{2192}' => '\u{219B}',
+        '\u{2190}' => '\u{219A}',
+        '\u{2194}' => '\u{21AE}',
+        '\u{21D2}' => '\u{21CF}',
+        '\u{21D0}' => '\u{21CD}',
+        '\u{21D4}' => '\u{21CE}',
+        _ => return format!("{}\u{0338}", s),
+    };
+    negated.to_string()
+}
+
+/// Apply `\not` to an already-parsed atom.
+fn negate_node(node: EqNode) -> EqNode {
+    match node {
+        EqNode::Text(s) if !s.is_empty() => maybe_wrap_op_spacing(negate_symbol(&s)),
+        EqNode::Seq(v)
+            if v.len() == 3
+                && matches!(v[0], EqNode::Space(_))
+                && matches!(v[2], EqNode::Space(_))
+                && matches!(&v[1], EqNode::Text(s) if !s.is_empty()) =>
+        {
+            match &v[1] {
+                EqNode::Text(s) => maybe_wrap_op_spacing(negate_symbol(s)),
+                _ => unreachable!(),
+            }
+        }
+        EqNode::Text(_) => EqNode::Text("\\not".to_string()),
+        other => EqNode::Seq(vec![EqNode::Text("\\not".to_string()), other]),
+    }
+}
+
+/// Collapse a node list into a single node.
+fn finish_nodes(mut nodes: Vec<EqNode>) -> EqNode {
+    match nodes.len() {
+        0 => EqNode::Text(String::new()),
+        1 => nodes.remove(0),
+        _ => EqNode::Seq(nodes),
+    }
+}
+
+/// Join environment cells back into one node, keeping `&` separators as text.
+fn join_cells(mut cells: Vec<EqNode>) -> EqNode {
+    if cells.len() == 1 {
+        return cells.remove(0);
+    }
+    let mut out = Vec::new();
+    for (i, cell) in cells.into_iter().enumerate() {
+        if i > 0 {
+            out.push(EqNode::Text("&".to_string()));
+        }
+        out.push(cell);
+    }
+    EqNode::Seq(out)
+}
+
+/// Convert a TeX dimension like `1em`, `-3mu`, `2.5pt` or `1cm` to the
+/// parser's spacing units (where `\quad` = 1em = 18). Returns `None` if the
+/// string isn't a dimension.
+fn parse_dimension(s: &str) -> Option<f32> {
+    let s = s.trim();
+    let num_end = s
+        .char_indices()
+        .find(|&(i, c)| !(c.is_ascii_digit() || c == '.' || ((c == '-' || c == '+') && i == 0)))
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    let value: f32 = s[..num_end].trim().parse().ok()?;
+    let pt = EM / 10.0; // assume a 10pt font, so 1em = 10pt
+    let factor = match s[num_end..].trim() {
+        "em" => EM,
+        "ex" => EM * 0.431,
+        "mu" => EM / 18.0,
+        "pt" | "px" | "bp" => pt,
+        "mm" => 2.845 * pt,
+        "cm" => 28.45 * pt,
+        "in" => 72.27 * pt,
+        _ => return None,
+    };
+    Some(value * factor)
+}
+
+/// Read a balanced `{...}` group from `chars` starting at `*i` (which must
+/// point at `{`). Returns the inner text and advances `*i` past the group.
+fn take_braced(chars: &[char], i: &mut usize) -> String {
+    let mut out = String::new();
+    if chars.get(*i) != Some(&'{') {
+        return out;
+    }
+    *i += 1;
+    let mut depth = 1;
+    while let Some(&c) = chars.get(*i) {
+        *i += 1;
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Parse a LaTeX math string into an [`EqNode`] tree.
 ///
 /// Accepts standard LaTeX math-mode markup as well as bareword shortcuts
 /// (`pi`, `sqrt(x)`, `int_0^1`, etc.). Never returns an error — malformed
-/// input produces a best-effort tree.
+/// input produces a best-effort tree, and stray structural tokens (`}`, `&`,
+/// `\\`, `\end{...}`) are kept as literal text instead of being dropped.
 ///
 /// # Examples
 ///
@@ -80,12 +282,37 @@ pub fn big_op_symbol(name: &str) -> &'static str {
 /// ```
 pub fn parse_equation(input: &str) -> EqNode {
     let mut parser = EqParser::new(input);
-    parser.parse_sequence()
+    let mut parts = Vec::new();
+    loop {
+        parts.push(parser.parse_sequence());
+        // The top-level sequence has no terminators, so this only triggers
+        // if a future change introduces one. Never lose input regardless.
+        match parser.advance() {
+            Some(ch) => parts.push(EqNode::Text(ch.to_string())),
+            None => break,
+        }
+    }
+    if parts.len() == 1 {
+        return parts.remove(0);
+    }
+    let mut nodes = Vec::new();
+    for part in parts {
+        match part {
+            EqNode::Seq(inner) => nodes.extend(inner),
+            EqNode::Text(ref s) if s.is_empty() => {}
+            other => nodes.push(other),
+        }
+    }
+    finish_nodes(nodes)
 }
 
 pub struct EqParser {
     chars: Vec<char>,
     pos: usize,
+    /// Inside a `{...}` group: `}` terminates the current sequence.
+    in_group: bool,
+    /// Inside an environment body: `&`, `\\` and `\end` terminate the current sequence.
+    in_env: bool,
 }
 
 impl EqParser {
@@ -93,6 +320,8 @@ impl EqParser {
         Self {
             chars: input.chars().collect(),
             pos: 0,
+            in_group: false,
+            in_env: false,
         }
     }
 
@@ -108,6 +337,45 @@ impl EqParser {
         ch
     }
 
+    fn skip_whitespace(&mut self) {
+        while matches!(self.peek(), Some(c) if c.is_whitespace()) {
+            self.pos += 1;
+        }
+    }
+
+    /// Peek at the first non-whitespace character without consuming anything.
+    fn peek_past_whitespace(&self) -> Option<char> {
+        self.chars[self.pos..].iter().copied().find(|c| !c.is_whitespace())
+    }
+
+    /// The name of the command at the current position (`\name`), if any.
+    fn peek_command_name(&self) -> Option<String> {
+        if self.peek() != Some('\\') {
+            return None;
+        }
+        let name: String = self.chars[self.pos + 1..]
+            .iter()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+        if name.is_empty() { None } else { Some(name) }
+    }
+
+    /// Consume a presentational no-op command (`\displaystyle`, `\limits`,
+    /// `\label{...}`, ...) if one is at the current position.
+    fn skip_noop_command(&mut self) -> bool {
+        let Some(name) = self.peek_command_name() else { return false };
+        if !NOOP_COMMANDS.contains(&name.as_str()) {
+            return false;
+        }
+        self.pos += 1 + name.chars().count();
+        self.skip_whitespace();
+        if name == "label" {
+            self.parse_brace_arg_opt();
+            self.skip_whitespace();
+        }
+        true
+    }
+
     fn parse_sequence(&mut self) -> EqNode {
         self.parse_sequence_until(false)
     }
@@ -116,67 +384,83 @@ impl EqParser {
         self.parse_sequence_until_ex(stop_on_paren, false)
     }
 
+    /// Whether the current position terminates the sequence being parsed.
+    fn at_sequence_stop(&self, stop_on_paren: bool, stop_on_right: bool) -> bool {
+        match self.peek() {
+            None => true,
+            Some('}') => self.in_group,
+            Some(')') => stop_on_paren,
+            Some('&') => self.in_env,
+            Some('\\') => {
+                (self.in_env && (self.is_row_separator() || self.lookahead_command("end")))
+                    || (stop_on_right && self.lookahead_command("right"))
+            }
+            _ => false,
+        }
+    }
+
     fn parse_sequence_until_ex(&mut self, stop_on_paren: bool, stop_on_right: bool) -> EqNode {
         let mut nodes = Vec::new();
-        while self.pos < self.chars.len() {
-            let ch = match self.peek() {
-                Some(c) => c,
-                None => break,
-            };
-            // Stop on \right when parsing \left...\right content
-            if stop_on_right && ch == '\\' {
-                if self.lookahead_command("right") {
+        while let Some(ch) = self.peek() {
+            if self.at_sequence_stop(stop_on_paren, stop_on_right) {
+                break;
+            }
+            if self.skip_noop_command() {
+                continue;
+            }
+            if ch == '\\' {
+                // Infix {a \over b} and {n \choose k}: everything before is the
+                // top, everything after (to the end of the group) the bottom.
+                let infix = if self.lookahead_command("over") {
+                    Some("over")
+                } else if self.lookahead_command("choose") {
+                    Some("choose")
+                } else {
+                    None
+                };
+                if let Some(cmd) = infix {
+                    self.pos += 1 + cmd.len();
+                    let top = finish_nodes(std::mem::take(&mut nodes));
+                    let bottom = self.parse_sequence_until_ex(stop_on_paren, stop_on_right);
+                    nodes.push(if cmd == "over" {
+                        EqNode::Frac(Box::new(top), Box::new(bottom))
+                    } else {
+                        EqNode::Binom(Box::new(top), Box::new(bottom))
+                    });
                     break;
                 }
             }
-            // Stop on \end when parsing environment bodies
-            if ch == '\\' && self.lookahead_command("end") {
-                break;
+            if ch == '/' {
+                self.advance();
+                // Turn last node into fraction numerator
+                let numer = if let Some(n) = nodes.pop() { n } else { EqNode::Text(String::new()) };
+                let denom = self.parse_group_atom();
+                let denom = self.parse_postfix(denom);
+                nodes.push(EqNode::Frac(Box::new(numer), Box::new(denom)));
+                continue;
             }
-            match ch {
-                '}' => break,
-                ')' if stop_on_paren => break,
-                // Row separator \\ inside environments — stop to let caller handle
-                '\\' if self.is_row_separator() => break,
-                // Column separator & — stop to let caller handle
-                '&' => break,
-                '/' => {
-                    self.advance();
-                    // Turn last node into fraction numerator
-                    let numer = if let Some(n) = nodes.pop() { n } else { EqNode::Text(String::new()) };
-                    let denom = self.parse_group_atom();
-                    let denom = self.parse_postfix(denom);
-                    nodes.push(EqNode::Frac(Box::new(numer), Box::new(denom)));
-                }
-                _ => {
-                    let atom = self.parse_atom();
-                    let node = self.parse_postfix(atom);
-                    // Context-aware minus: add operator spacing only for binary minus
-                    if let EqNode::Text(ref s) = node {
-                        if s == "-" && !nodes.is_empty() {
-                            // Check if the previous node looks like an operand (not an operator/space)
-                            let is_binary = match nodes.last() {
-                                Some(EqNode::Space(_)) => false,
-                                Some(_) => true,
-                                None => false,
-                            };
-                            if is_binary {
-                                nodes.push(EqNode::Space(OP_SPACE));
-                                nodes.push(node);
-                                nodes.push(EqNode::Space(OP_SPACE));
-                                continue;
-                            }
-                        }
+            let atom = self.parse_atom();
+            let node = self.parse_postfix(atom);
+            // Context-aware minus: add operator spacing only for binary minus
+            if let EqNode::Text(ref s) = node {
+                if s == "-" && !nodes.is_empty() {
+                    // Check if the previous node looks like an operand (not an operator/space)
+                    let is_binary = match nodes.last() {
+                        Some(EqNode::Space(_)) => false,
+                        Some(_) => true,
+                        None => false,
+                    };
+                    if is_binary {
+                        nodes.push(EqNode::Space(OP_SPACE));
+                        nodes.push(node);
+                        nodes.push(EqNode::Space(OP_SPACE));
+                        continue;
                     }
-                    nodes.push(node);
                 }
             }
+            nodes.push(node);
         }
-        match nodes.len() {
-            0 => EqNode::Text(String::new()),
-            1 => nodes.remove(0),
-            _ => EqNode::Seq(nodes),
-        }
+        finish_nodes(nodes)
     }
 
     /// Check if the next two chars are `\\` (row separator in matrices/cases).
@@ -214,28 +498,31 @@ impl EqParser {
     /// Used by sqrt, frac, and other constructs that take arguments.
     /// Tracks paren nesting so `((3x+3))` correctly distinguishes inner visible parens from grouping parens.
     fn parse_group_atom(&mut self) -> EqNode {
+        self.skip_whitespace();
         if self.peek() == Some('(') {
             self.advance();
             // Parse content, but track nested parens so we only stop
             // on the `)` that matches our opening `(`
             let mut nodes = Vec::new();
             let mut depth = 0i32;
-            while self.pos < self.chars.len() {
-                match self.peek() {
-                    Some(')') if depth == 0 => break,
-                    Some(')') => {
+            while let Some(ch) = self.peek() {
+                match ch {
+                    ')' if depth == 0 => break,
+                    ')' => {
                         depth -= 1;
                         self.advance();
                         nodes.push(EqNode::Text(")".into()));
                     }
-                    Some('(') => {
+                    '(' => {
                         depth += 1;
                         self.advance();
                         nodes.push(EqNode::Text("(".into()));
                     }
-                    Some('}') => break,
-                    None => break,
+                    _ if self.at_sequence_stop(false, false) => break,
                     _ => {
+                        if self.skip_noop_command() {
+                            continue;
+                        }
                         let atom = self.parse_atom();
                         let node = self.parse_postfix(atom);
                         nodes.push(node);
@@ -245,26 +532,120 @@ impl EqParser {
             if self.peek() == Some(')') {
                 self.advance();
             }
-            return match nodes.len() {
-                0 => EqNode::Text(String::new()),
-                1 => nodes.remove(0),
-                _ => EqNode::Seq(nodes),
-            };
+            return finish_nodes(nodes);
         }
         self.parse_atom()
+    }
+
+    /// Parse a `{...}` group as an isolated sequence. Inside braces, `&` and
+    /// `\\` are literal even when the group sits in an environment cell.
+    fn parse_brace_group(&mut self) -> EqNode {
+        self.advance(); // '{'
+        let saved = (self.in_group, self.in_env);
+        self.in_group = true;
+        self.in_env = false;
+        let inner = self.parse_sequence();
+        (self.in_group, self.in_env) = saved;
+        if self.peek() == Some('}') {
+            self.advance();
+        }
+        inner
+    }
+
+    /// Parse an optional `[...]` argument. Assumes the current char is `[`.
+    fn parse_bracket_arg(&mut self) -> EqNode {
+        self.advance(); // '['
+        let mut nodes = Vec::new();
+        while let Some(ch) = self.peek() {
+            match ch {
+                ']' => break,
+                '}' if self.in_group => break,
+                _ => {
+                    let atom = self.parse_atom();
+                    let node = self.parse_postfix(atom);
+                    nodes.push(node);
+                }
+            }
+        }
+        if self.peek() == Some(']') {
+            self.advance();
+        }
+        finish_nodes(nodes)
+    }
+
+    /// Parse the argument of a `^` or `_`.
+    fn parse_script_arg(&mut self) -> EqNode {
+        self.skip_whitespace();
+        self.parse_atom()
+    }
+
+    /// Collect `^upper` / `_lower` limits after a big operator, skipping
+    /// `\limits` / `\nolimits`.
+    fn parse_big_op_limits(&mut self) -> (Option<EqNode>, Option<EqNode>) {
+        let mut upper = None;
+        let mut lower = None;
+        loop {
+            if self.peek_past_whitespace() == Some('\\') {
+                let save = self.pos;
+                self.skip_whitespace();
+                if self.skip_noop_command() {
+                    continue;
+                }
+                self.pos = save;
+            }
+            match self.peek_past_whitespace() {
+                Some('^') if upper.is_none() => {
+                    self.skip_whitespace();
+                    self.advance();
+                    upper = Some(self.parse_script_arg());
+                }
+                Some('_') if lower.is_none() => {
+                    self.skip_whitespace();
+                    self.advance();
+                    lower = Some(self.parse_script_arg());
+                }
+                _ => break,
+            }
+        }
+        (upper, lower)
+    }
+
+    /// Collect the `_lower` limit after a named operator like `\lim`.
+    fn parse_limit_lower(&mut self) -> Option<EqNode> {
+        loop {
+            if self.peek_past_whitespace() == Some('\\') {
+                let save = self.pos;
+                self.skip_whitespace();
+                if self.skip_noop_command() {
+                    continue;
+                }
+                self.pos = save;
+            }
+            break;
+        }
+        if self.peek_past_whitespace() == Some('_') {
+            self.skip_whitespace();
+            self.advance();
+            self.skip_whitespace();
+            return Some(self.parse_group_atom());
+        }
+        None
+    }
+
+    fn big_op(&mut self, name: &str) -> EqNode {
+        let symbol = big_op_symbol(name).to_string();
+        let (upper, lower) = self.parse_big_op_limits();
+        EqNode::BigOp {
+            symbol,
+            lower: lower.map(Box::new),
+            upper: upper.map(Box::new),
+        }
     }
 
     fn parse_atom(&mut self) -> EqNode {
         match self.peek() {
             None => EqNode::Text(String::new()),
-            Some('{') => {
-                self.advance();
-                let inner = self.parse_sequence();
-                if self.peek() == Some('}') {
-                    self.advance();
-                }
-                inner
-            }
+            Some('{') => self.parse_brace_group(),
             Some('\\') => {
                 self.advance();
                 self.parse_command()
@@ -278,27 +659,7 @@ impl EqParser {
                 // Try bare-word big operators (int, sum, prod, etc.)
                 for &kw in BIG_OP_COMMANDS {
                     if self.try_keyword(kw) {
-                        let symbol = big_op_symbol(kw).to_string();
-                        let mut upper: Option<EqNode> = None;
-                        let mut lower: Option<EqNode> = None;
-                        loop {
-                            match self.peek() {
-                                Some('^') if upper.is_none() => {
-                                    self.advance();
-                                    upper = Some(self.parse_atom());
-                                }
-                                Some('_') if lower.is_none() => {
-                                    self.advance();
-                                    lower = Some(self.parse_atom());
-                                }
-                                _ => break,
-                            }
-                        }
-                        let op = EqNode::BigOp {
-                            symbol,
-                            lower: lower.map(Box::new),
-                            upper: upper.map(Box::new),
-                        };
+                        let op = self.big_op(kw);
                         // If followed by (...), consume as the integrand/summand body
                         if self.peek() == Some('(') {
                             let body = self.parse_group_atom();
@@ -318,11 +679,7 @@ impl EqParser {
                 ];
                 for &kw in BARE_LIMIT_OPS {
                     if self.try_keyword(kw) {
-                        let mut lower: Option<EqNode> = None;
-                        if self.peek() == Some('_') {
-                            self.advance();
-                            lower = Some(self.parse_group_atom());
-                        }
+                        let lower = self.parse_limit_lower();
                         return EqNode::Limit {
                             name: kw.to_string(),
                             lower: lower.map(Box::new),
@@ -380,14 +737,16 @@ impl EqParser {
         let mut sub: Option<EqNode> = None;
 
         loop {
-            match self.peek() {
+            match self.peek_past_whitespace() {
                 Some('^') if sup.is_none() => {
+                    self.skip_whitespace();
                     self.advance();
-                    sup = Some(self.parse_atom());
+                    sup = Some(self.parse_script_arg());
                 }
                 Some('_') if sub.is_none() => {
+                    self.skip_whitespace();
                     self.advance();
-                    sub = Some(self.parse_atom());
+                    sub = Some(self.parse_script_arg());
                 }
                 _ => break,
             }
@@ -446,8 +805,8 @@ impl EqParser {
     }
 
     fn parse_command(&mut self) -> EqNode {
-        // Handle single-char (non-alpha) spacing commands first:
-        // \, \; \: \> \! and also \\ (row separator — should not reach here normally)
+        // Handle single-char (non-alpha) commands first:
+        // \, \; \: \> \! spacing, escaped characters, and a stray \\.
         if let Some(ch) = self.peek() {
             if !ch.is_ascii_alphabetic() {
                 self.advance();
@@ -456,9 +815,8 @@ impl EqParser {
                     ':' | '>' => EqNode::Space(4.0), // medium space
                     ';' => EqNode::Space(5.0),   // thick space
                     '!' => EqNode::Space(-3.0),  // negative thin space
-                    '\\' => EqNode::Text(String::new()), // row separator \\, handled elsewhere
-                    '{' => EqNode::Text("{".to_string()),
-                    '}' => EqNode::Text("}".to_string()),
+                    // A row separator outside an environment: keep it visible.
+                    '\\' => EqNode::Text("\\\\".to_string()),
                     ' ' => EqNode::Space(4.0),   // backslash-space
                     _ => EqNode::Text(ch.to_string()),
                 };
@@ -479,24 +837,255 @@ impl EqParser {
             self.advance();
         }
 
+        if NOOP_COMMANDS.contains(&name.as_str()) {
+            if name == "label" {
+                self.parse_brace_arg_opt();
+            }
+            return EqNode::Text(String::new());
+        }
+
         // Named spacing commands
+        let space = match name.as_str() {
+            "quad" => Some(EM),
+            "qquad" => Some(2.0 * EM),
+            "thinspace" => Some(3.0),
+            "medspace" => Some(4.0),
+            "thickspace" => Some(5.0),
+            "enspace" => Some(EM / 2.0),
+            "negthinspace" => Some(-3.0),
+            "negmedspace" => Some(-4.0),
+            "negthickspace" => Some(-5.0),
+            _ => None,
+        };
+        if let Some(width) = space {
+            return EqNode::Space(width);
+        }
+
         match name.as_str() {
-            "quad" => return EqNode::Space(18.0),
-            "qquad" => return EqNode::Space(36.0),
+            // \hspace{1em}, \hspace*{2pt}
+            "hspace" => {
+                if self.peek() == Some('*') {
+                    self.advance();
+                    self.skip_whitespace();
+                }
+                return match self.parse_brace_arg_opt() {
+                    Some(dim) => match parse_dimension(&dim) {
+                        Some(w) => EqNode::Space(w),
+                        None => EqNode::Text(format!("\\hspace{{{}}}", dim)),
+                    },
+                    None => EqNode::Text("\\hspace".to_string()),
+                };
+            }
+            // \kern3mu, \mkern-2mu, \mskip 4mu, \hskip 1em
+            "kern" | "mkern" | "mskip" | "hskip" => {
+                let start = self.pos;
+                let mut dim = String::new();
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() || c == '.' || ((c == '-' || c == '+') && dim.is_empty()) {
+                        dim.push(c);
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.skip_whitespace();
+                for _ in 0..2 {
+                    match self.peek() {
+                        Some(c) if c.is_ascii_alphabetic() => {
+                            dim.push(c);
+                            self.advance();
+                        }
+                        _ => break,
+                    }
+                }
+                return match parse_dimension(&dim) {
+                    Some(w) => EqNode::Space(w),
+                    None => {
+                        self.pos = start;
+                        EqNode::Text(format!("\\{}", name))
+                    }
+                };
+            }
+
+            // Upright text blocks
+            "text" | "textrm" | "textnormal" | "textup" | "mbox" | "hbox" => {
+                return self.parse_text_block();
+            }
+            // Styled text blocks
+            "textbf" | "textsf" | "texttt" => {
+                let kind = match name.as_str() {
+                    "textbf" => MathFontKind::Bold,
+                    "textsf" => MathFontKind::SansSerif,
+                    _ => MathFontKind::Monospace,
+                };
+                let content = self.parse_text_block();
+                return EqNode::MathFont { kind, content: Box::new(content) };
+            }
+            // \operatorname{rank}, \operatorname*{argmax}_x
+            "operatorname" => {
+                if self.peek() == Some('*') {
+                    self.advance();
+                    self.skip_whitespace();
+                }
+                let raw = match self.parse_brace_arg_opt() {
+                    Some(raw) => raw,
+                    None => self.advance().map(|c| c.to_string()).unwrap_or_default(),
+                };
+                let op_name: String = raw
+                    .replace("\\,", " ")
+                    .replace("\\;", " ")
+                    .replace("\\:", " ")
+                    .replace("\\ ", " ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let lower = self.parse_limit_lower();
+                return EqNode::Limit { name: op_name, lower: lower.map(Box::new) };
+            }
+
+            // \left ... \right — stretchy delimiters
+            "left" => return self.parse_left_right(),
+            // \middle| inside \left...\right
+            "middle" => return EqNode::Text(self.parse_delimiter()),
+
+            // \begin{env} ... \end{env}
+            "begin" => return self.parse_begin_env(),
+            // A stray \end{...} outside any environment: keep it as text.
+            "end" => {
+                return match self.parse_brace_arg_opt() {
+                    Some(env) => EqNode::Text(format!("\\end{{{}}}", env)),
+                    None => EqNode::Text("\\end".to_string()),
+                };
+            }
+
+            // Binomials
+            "binom" | "dbinom" | "tbinom" => {
+                let top = self.parse_group_atom();
+                let bot = self.parse_group_atom();
+                return EqNode::Binom(Box::new(top), Box::new(bot));
+            }
+
+            // \overbrace{...}^{label}
+            "overbrace" => {
+                let content = self.parse_atom();
+                let mut label = None;
+                if self.peek_past_whitespace() == Some('^') {
+                    self.skip_whitespace();
+                    self.advance();
+                    label = Some(Box::new(self.parse_script_arg()));
+                }
+                return EqNode::Brace { content: Box::new(content), label, over: true };
+            }
+
+            // \underbrace{...}_{label}
+            "underbrace" => {
+                let content = self.parse_atom();
+                let mut label = None;
+                if self.peek_past_whitespace() == Some('_') {
+                    self.skip_whitespace();
+                    self.advance();
+                    label = Some(Box::new(self.parse_script_arg()));
+                }
+                return EqNode::Brace { content: Box::new(content), label, over: false };
+            }
+
+            // \overset{annotation}{base} and \stackrel{annotation}{base}
+            "overset" | "stackrel" | "underset" => {
+                let annotation = self.parse_group_atom();
+                let base = self.parse_group_atom();
+                return EqNode::StackRel {
+                    base: Box::new(base),
+                    annotation: Box::new(annotation),
+                    over: name != "underset",
+                };
+            }
+
+            // Extensible arrows: \xrightarrow[below]{above}
+            "xrightarrow" | "xleftarrow" | "xRightarrow" | "xLeftarrow"
+            | "xleftrightarrow" | "xLeftrightarrow" | "xmapsto"
+            | "xhookrightarrow" | "xhookleftarrow" | "xrightleftharpoons" => {
+                let arrow = match name.as_str() {
+                    "xrightarrow" => "\u{2192}",
+                    "xleftarrow" => "\u{2190}",
+                    "xRightarrow" => "\u{21D2}",
+                    "xLeftarrow" => "\u{21D0}",
+                    "xleftrightarrow" => "\u{2194}",
+                    "xLeftrightarrow" => "\u{21D4}",
+                    "xmapsto" => "\u{21A6}",
+                    "xhookrightarrow" => "\u{21AA}",
+                    "xhookleftarrow" => "\u{21A9}",
+                    _ => "\u{21CC}",
+                };
+                let below = if self.peek() == Some('[') { Some(self.parse_bracket_arg()) } else { None };
+                let above = self.parse_group_atom();
+                let mut node = EqNode::Text(arrow.to_string());
+                if let Some(below) = below {
+                    node = EqNode::StackRel { base: Box::new(node), annotation: Box::new(below), over: false };
+                }
+                node = EqNode::StackRel { base: Box::new(node), annotation: Box::new(above), over: true };
+                return EqNode::Seq(vec![EqNode::Space(OP_SPACE), node, EqNode::Space(OP_SPACE)]);
+            }
+
+            // Fractions (display/text style variants map to the same node)
+            "frac" | "dfrac" | "tfrac" | "cfrac" => {
+                if name == "cfrac" && self.peek() == Some('[') {
+                    self.parse_bracket_arg(); // [l] / [r] numerator alignment
+                }
+                let numer = self.parse_group_atom();
+                let denom = self.parse_group_atom();
+                return EqNode::Frac(Box::new(numer), Box::new(denom));
+            }
+
+            // Square root
+            "sqrt" => {
+                let arg = self.parse_group_atom();
+                return EqNode::Sqrt(Box::new(arg));
+            }
+
+            // \not\in, \not=, \not\subset, ...
+            "not" => {
+                let next = self.parse_atom();
+                return negate_node(next);
+            }
+
+            // Modular arithmetic
+            "bmod" => {
+                return EqNode::Seq(vec![
+                    EqNode::Space(OP_SPACE),
+                    EqNode::Limit { name: "mod".to_string(), lower: None },
+                    EqNode::Space(OP_SPACE),
+                ]);
+            }
+            "pmod" => {
+                let arg = self.parse_group_atom();
+                return EqNode::Seq(vec![
+                    EqNode::Space(8.0),
+                    EqNode::Text("(".to_string()),
+                    EqNode::Limit { name: "mod".to_string(), lower: None },
+                    EqNode::Space(6.0),
+                    arg,
+                    EqNode::Text(")".to_string()),
+                ]);
+            }
+            "mod" => {
+                let arg = self.parse_group_atom();
+                return EqNode::Seq(vec![
+                    EqNode::Space(12.0),
+                    EqNode::Limit { name: "mod".to_string(), lower: None },
+                    EqNode::Space(6.0),
+                    arg,
+                ]);
+            }
+
             _ => {}
         }
 
-        // \text{...} — upright text block
-        if name == "text" {
-            return self.parse_text_block();
-        }
-
-        // \mathbf, \mathbb, \mathcal, \mathrm, \mathfrak, \mathsf, \mathtt
+        // Math fonts
         if let Some(kind) = match name.as_str() {
             "mathbf" => Some(MathFontKind::Bold),
-            "mathbb" => Some(MathFontKind::Blackboard),
-            "mathcal" => Some(MathFontKind::Calligraphic),
-            "mathrm" => Some(MathFontKind::Roman),
+            "mathbb" | "Bbb" => Some(MathFontKind::Blackboard),
+            "mathcal" | "mathscr" => Some(MathFontKind::Calligraphic),
+            "mathrm" | "mathup" => Some(MathFontKind::Roman),
             "mathfrak" => Some(MathFontKind::Fraktur),
             "mathsf" => Some(MathFontKind::SansSerif),
             "mathtt" => Some(MathFontKind::Monospace),
@@ -506,80 +1095,14 @@ impl EqParser {
             return EqNode::MathFont { kind, content: Box::new(arg) };
         }
 
-        // \left ... \right — stretchy delimiters
-        if name == "left" {
-            return self.parse_left_right();
-        }
-
-        // \begin{env} ... \end{env}
-        if name == "begin" {
-            return self.parse_begin_env();
-        }
-
-        // \binom{n}{k}
-        if name == "binom" {
-            let top = self.parse_group_atom();
-            let bot = self.parse_group_atom();
-            return EqNode::Binom(Box::new(top), Box::new(bot));
-        }
-
-        // \overbrace{...}^{label}
-        if name == "overbrace" {
-            let content = self.parse_atom();
-            let mut label = None;
-            if self.peek() == Some('^') {
-                self.advance();
-                label = Some(Box::new(self.parse_atom()));
-            }
-            return EqNode::Brace { content: Box::new(content), label, over: true };
-        }
-
-        // \underbrace{...}_{label}
-        if name == "underbrace" {
-            let content = self.parse_atom();
-            let mut label = None;
-            if self.peek() == Some('_') {
-                self.advance();
-                label = Some(Box::new(self.parse_atom()));
-            }
-            return EqNode::Brace { content: Box::new(content), label, over: false };
-        }
-
-        // \overset{annotation}{base} and \stackrel{annotation}{base}
-        if name == "overset" || name == "stackrel" {
-            let annotation = self.parse_group_atom();
-            let base = self.parse_group_atom();
-            return EqNode::StackRel { base: Box::new(base), annotation: Box::new(annotation), over: true };
-        }
-
-        // \underset{annotation}{base}
-        if name == "underset" {
-            let annotation = self.parse_group_atom();
-            let base = self.parse_group_atom();
-            return EqNode::StackRel { base: Box::new(base), annotation: Box::new(annotation), over: false };
-        }
-
-        // Fractions
-        if name == "frac" {
-            let numer = self.parse_group_atom();
-            let denom = self.parse_group_atom();
-            return EqNode::Frac(Box::new(numer), Box::new(denom));
-        }
-
-        // Square root
-        if name == "sqrt" {
-            let arg = self.parse_group_atom();
-            return EqNode::Sqrt(Box::new(arg));
-        }
-
         // Accents
         if let Some(kind) = match name.as_str() {
-            "hat" => Some(AccentKind::Hat),
+            "hat" | "widehat" => Some(AccentKind::Hat),
             "bar" | "overline" => Some(AccentKind::Bar),
             "dot" => Some(AccentKind::Dot),
             "ddot" => Some(AccentKind::DoubleDot),
-            "tilde" => Some(AccentKind::Tilde),
-            "vec" => Some(AccentKind::Vec),
+            "tilde" | "widetilde" => Some(AccentKind::Tilde),
+            "vec" | "overrightarrow" => Some(AccentKind::Vec),
             _ => None,
         } {
             let arg = self.parse_atom();
@@ -587,51 +1110,17 @@ impl EqParser {
         }
 
         // Named limit operators (lim, min, max, sup, inf, log, ln, sin, cos, tan, etc.)
-        static LIMIT_OPS: &[&str] = &[
-            "lim", "liminf", "limsup",
-            "min", "max", "sup", "inf",
-            "log", "ln", "exp",
-            "sin", "cos", "tan", "cot", "sec", "csc",
-            "arcsin", "arccos", "arctan",
-            "sinh", "cosh", "tanh",
-            "det", "dim", "ker", "deg", "gcd", "hom", "arg",
-        ];
         if LIMIT_OPS.contains(&name.as_str()) {
-            let mut lower: Option<EqNode> = None;
-            if self.peek() == Some('_') {
-                self.advance();
-                lower = Some(self.parse_group_atom());
-            }
+            let lower = self.parse_limit_lower();
             return EqNode::Limit {
                 name: name.clone(),
                 lower: lower.map(Box::new),
             };
         }
 
-        // Big operators -- parse as BigOp node, then collect limits via postfix
+        // Big operators -- parse as BigOp node with limits
         if is_big_op(&name) {
-            let symbol = big_op_symbol(&name).to_string();
-            // Collect limits
-            let mut upper: Option<EqNode> = None;
-            let mut lower: Option<EqNode> = None;
-            loop {
-                match self.peek() {
-                    Some('^') if upper.is_none() => {
-                        self.advance();
-                        upper = Some(self.parse_atom());
-                    }
-                    Some('_') if lower.is_none() => {
-                        self.advance();
-                        lower = Some(self.parse_atom());
-                    }
-                    _ => break,
-                }
-            }
-            return EqNode::BigOp {
-                symbol,
-                lower: lower.map(Box::new),
-                upper: upper.map(Box::new),
-            };
+            return self.big_op(&name);
         }
 
         // Greek letter / symbol lookup
@@ -641,54 +1130,83 @@ impl EqParser {
 
     /// Parse \text{...} — consume braces and return raw text (no math parsing).
     fn parse_text_block(&mut self) -> EqNode {
-        if self.peek() == Some('{') {
-            self.advance();
-            let mut text = String::new();
-            let mut depth = 1;
-            while let Some(ch) = self.advance() {
-                if ch == '{' {
-                    depth += 1;
-                    text.push(ch);
-                } else if ch == '}' {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
+        EqNode::TextBlock(self.parse_brace_arg_opt().unwrap_or_default())
+    }
+
+    /// Parse a delimiter after `\left`, `\right`, `\middle` or `\big`.
+    fn parse_delimiter(&mut self) -> String {
+        self.skip_whitespace();
+        match self.peek() {
+            None => String::new(),
+            Some('.') => {
+                self.advance();
+                String::new()
+            }
+            Some('<') => {
+                self.advance();
+                "\u{27E8}".to_string()
+            }
+            Some('>') => {
+                self.advance();
+                "\u{27E9}".to_string()
+            }
+            Some('\\') => {
+                self.advance();
+                match self.peek() {
+                    Some(c) if c.is_ascii_alphabetic() => {
+                        let mut name = String::new();
+                        while let Some(c) = self.peek() {
+                            if c.is_ascii_alphabetic() {
+                                name.push(c);
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        match name.as_str() {
+                            "vert" | "lvert" | "rvert" => "|".to_string(),
+                            "Vert" | "lVert" | "rVert" => "\u{2016}".to_string(),
+                            "lbrace" => "{".to_string(),
+                            "rbrace" => "}".to_string(),
+                            "lbrack" => "[".to_string(),
+                            "rbrack" => "]".to_string(),
+                            "backslash" => "\\".to_string(),
+                            other => latex_to_unicode(other).unwrap_or_else(|| format!("\\{}", other)),
+                        }
                     }
-                    text.push(ch);
-                } else {
-                    text.push(ch);
+                    Some('|') => {
+                        self.advance();
+                        "\u{2016}".to_string()
+                    }
+                    Some(c) => {
+                        self.advance();
+                        c.to_string()
+                    }
+                    None => "\\".to_string(),
                 }
             }
-            EqNode::TextBlock(text)
-        } else {
-            EqNode::TextBlock(String::new())
+            Some(c) => {
+                self.advance();
+                c.to_string()
+            }
         }
     }
 
     /// Parse \left<delim> ... \right<delim>.
     fn parse_left_right(&mut self) -> EqNode {
-        // Consume the left delimiter character
-        let left_delim = match self.advance() {
-            Some('.') => String::new(), // invisible delimiter
-            Some(ch) => ch.to_string(),
-            None => String::new(),
-        };
+        let left_delim = self.parse_delimiter();
 
-        // Parse content until \right
+        // Parse content until \right. Like braces, \left...\right forms a
+        // group, so `&` and `\\` inside it are not environment separators.
+        let saved_env = self.in_env;
+        self.in_env = false;
         let content = self.parse_sequence_until_ex(false, true);
+        self.in_env = saved_env;
 
         // Consume \right and its delimiter
         let right_delim = if self.lookahead_command("right") {
-            self.advance(); // skip '\'
-            // consume 'right'
-            for _ in 0..5 { self.advance(); }
-            // skip trailing space
-            if self.peek() == Some(' ') { self.advance(); }
-            match self.advance() {
-                Some('.') => String::new(),
-                Some(ch) => ch.to_string(),
-                None => String::new(),
-            }
+            self.pos += "\\right".len();
+            self.parse_delimiter()
         } else {
             String::new()
         };
@@ -702,12 +1220,14 @@ impl EqParser {
 
     /// Parse \begin{env_name} ... \end{env_name}.
     fn parse_begin_env(&mut self) -> EqNode {
-        let env_name = self.parse_brace_arg();
+        let env_name = match self.parse_brace_arg_opt() {
+            Some(name) => name.trim().to_string(),
+            None => return EqNode::Text("\\begin".to_string()),
+        };
 
         match env_name.as_str() {
-            "matrix" | "pmatrix" | "bmatrix" | "vmatrix" | "Bmatrix" | "Vmatrix" => {
+            "matrix" | "pmatrix" | "bmatrix" | "vmatrix" | "Bmatrix" | "Vmatrix" | "smallmatrix" => {
                 let kind = match env_name.as_str() {
-                    "matrix" => MatrixKind::Plain,
                     "pmatrix" => MatrixKind::Paren,
                     "bmatrix" => MatrixKind::Bracket,
                     "vmatrix" => MatrixKind::VBar,
@@ -715,121 +1235,163 @@ impl EqParser {
                     "Bmatrix" => MatrixKind::Brace,
                     _ => MatrixKind::Plain,
                 };
-                let rows = self.parse_matrix_body();
+                let (rows, _) = self.parse_env_body(false);
                 self.consume_end_env(&env_name);
                 EqNode::Matrix { kind, rows }
             }
-            "cases" => {
-                let rows = self.parse_cases_body();
-                self.consume_end_env("cases");
+            "cases" | "dcases" => {
+                let (rows, _) = self.parse_env_body(false);
+                self.consume_end_env(&env_name);
+                let rows = rows
+                    .into_iter()
+                    .map(|mut cells| {
+                        let value = cells.remove(0);
+                        let condition = if cells.is_empty() { None } else { Some(join_cells(cells)) };
+                        (value, condition)
+                    })
+                    .collect();
                 EqNode::Cases { rows }
             }
             _ => {
-                // Unknown environment — just return empty text
-                EqNode::Text(format!("\\begin{{{}}}", env_name))
-            }
-        }
-    }
-
-    /// Consume {text} and return the text inside braces.
-    fn parse_brace_arg(&mut self) -> String {
-        if self.peek() == Some('{') {
-            self.advance();
-            let mut s = String::new();
-            while let Some(ch) = self.peek() {
-                if ch == '}' {
-                    self.advance();
-                    break;
+                // Unknown environment — keep everything as literal text so
+                // nothing the user typed disappears.
+                let (rows, hlines) = self.parse_env_body(false);
+                let mut parts = vec![EqNode::Text(format!("\\begin{{{}}}", env_name))];
+                for (i, row) in rows.into_iter().enumerate() {
+                    if i > 0 {
+                        parts.push(EqNode::Text("\\\\".to_string()));
+                    }
+                    for _ in hlines.iter().filter(|&&h| h == i) {
+                        parts.push(EqNode::Text("\\hline".to_string()));
+                    }
+                    for (j, cell) in row.into_iter().enumerate() {
+                        if j > 0 {
+                            parts.push(EqNode::Text("&".to_string()));
+                        }
+                        parts.push(cell);
+                    }
                 }
-                s.push(ch);
-                self.advance();
+                if self.consume_end_env(&env_name) {
+                    parts.push(EqNode::Text(format!("\\end{{{}}}", env_name)));
+                }
+                EqNode::Seq(parts)
             }
-            s
-        } else {
-            String::new()
         }
     }
 
-    /// Parse matrix body: rows separated by \\, columns by &. Stop at \end.
-    fn parse_matrix_body(&mut self) -> Vec<Vec<EqNode>> {
+    /// Consume `{text}` and return the text inside the (balanced) braces, or
+    /// `None` if the next character isn't `{`.
+    fn parse_brace_arg_opt(&mut self) -> Option<String> {
+        if self.peek() != Some('{') {
+            return None;
+        }
+        let mut pos = self.pos;
+        let s = take_braced(&self.chars, &mut pos);
+        self.pos = pos;
+        Some(s)
+    }
+
+    /// Consume any `\hline`s at the current position, recording them as
+    /// appearing above row `row_index`.
+    fn skip_hlines(&mut self, hlines: &mut Vec<usize>, row_index: usize) {
+        loop {
+            let save = self.pos;
+            self.skip_whitespace();
+            if self.lookahead_command("hline") {
+                self.pos += "\\hline".len();
+                hlines.push(row_index);
+            } else {
+                self.pos = save;
+                break;
+            }
+        }
+    }
+
+    /// After a `\\`, skip an optional spacing argument like `[2pt]`.
+    fn skip_row_spacing(&mut self) {
+        if self.peek() != Some('[') {
+            return;
+        }
+        let rest: String = self.chars[self.pos + 1..].iter().take_while(|&&c| c != ']').collect();
+        let closed = self.pos + 1 + rest.chars().count() < self.chars.len();
+        if closed && parse_dimension(&rest).is_some() {
+            self.pos += rest.chars().count() + 2;
+        }
+    }
+
+    /// Parse an environment body: rows separated by `\\`, cells by `&`.
+    /// Stops at `\end` (or at `}` if `brace_delimited`). Returns the rows and
+    /// the positions of any `\hline`s.
+    fn parse_env_body(&mut self, brace_delimited: bool) -> (Vec<Vec<EqNode>>, Vec<usize>) {
+        let saved = (self.in_group, self.in_env);
+        // An environment opened inside a `{...}` group also ends at that
+        // group's `}`, so half-typed input like `\frac{\begin{matrix} a}{b}`
+        // doesn't swallow the rest of the expression.
+        self.in_group = brace_delimited || saved.0;
+        self.in_env = true;
+
         let mut rows = Vec::new();
+        let mut hlines = Vec::new();
+        self.skip_hlines(&mut hlines, 0);
         loop {
             let mut row = Vec::new();
             loop {
-                let cell = self.parse_sequence_until_ex(false, false);
-                row.push(cell);
+                row.push(self.parse_sequence_until_ex(false, false));
                 if self.peek() == Some('&') {
-                    self.advance(); // consume &
+                    self.advance();
                     continue;
                 }
                 break;
             }
             rows.push(row);
-            // Check for \\ row separator
             if self.is_row_separator() {
-                self.advance(); // skip first '\'
-                self.advance(); // skip second '\'
-                // Skip optional trailing space
-                if self.peek() == Some(' ') { self.advance(); }
-                // Check if we're about to hit \end
-                if self.peek() == Some('\\') && self.lookahead_command("end") {
+                self.pos += 2;
+                self.skip_row_spacing();
+                self.skip_whitespace();
+                self.skip_hlines(&mut hlines, rows.len());
+                // Leading whitespace in a row (e.g. between `\hline` and
+                // `\end`) is insignificant.
+                self.skip_whitespace();
+                let at_end = self.peek().is_none()
+                    || self.lookahead_command("end")
+                    || (self.in_group && self.peek() == Some('}'));
+                if at_end {
                     break;
                 }
                 continue;
             }
             break;
         }
-        rows
+
+        (self.in_group, self.in_env) = saved;
+        (rows, hlines)
     }
 
-    /// Parse cases body: rows separated by \\, two columns by &.
-    fn parse_cases_body(&mut self) -> Vec<(EqNode, Option<EqNode>)> {
-        let mut rows = Vec::new();
-        loop {
-            let value = self.parse_sequence_until_ex(false, false);
-            let condition = if self.peek() == Some('&') {
-                self.advance();
-                Some(self.parse_sequence_until_ex(false, false))
-            } else {
-                None
-            };
-            rows.push((value, condition));
-            // Check for \\ row separator
-            if self.is_row_separator() {
-                self.advance();
-                self.advance();
-                if self.peek() == Some(' ') { self.advance(); }
-                if self.peek() == Some('\\') && self.lookahead_command("end") {
-                    break;
-                }
-                continue;
-            }
-            break;
+    /// Consume `\end{env_name}` if it is next and the name matches.
+    /// A mismatched `\end{other}` is left in place for an outer environment
+    /// (or, at the top level, kept as literal text).
+    fn consume_end_env(&mut self, expected: &str) -> bool {
+        if !self.lookahead_command("end") {
+            return false;
         }
-        rows
-    }
-
-    /// Consume \end{env_name} from the input.
-    fn consume_end_env(&mut self, _expected: &str) {
-        // We should be at \end{...}
-        if self.peek() == Some('\\') {
-            self.advance(); // skip '\'
-            // consume 'end'
-            for _ in 0..3 {
-                self.advance();
+        let save = self.pos;
+        self.pos += "\\end".len();
+        self.skip_whitespace();
+        match self.parse_brace_arg_opt() {
+            Some(name) if name.trim() == expected => true,
+            _ => {
+                self.pos = save;
+                false
             }
-            // skip trailing space
-            if self.peek() == Some(' ') { self.advance(); }
-            // consume {env_name}
-            self.parse_brace_arg();
         }
     }
 }
 
 /// Look up the Unicode character for a LaTeX command name.
 ///
-/// Covers 130+ symbols: Greek letters (upper and lowercase), operators,
-/// relations, set theory, arrows, delimiters, and miscellaneous symbols.
+/// Covers 270+ symbols: Greek letters (upper and lowercase, plus `var`
+/// variants), operators, relations and their negations, set theory, arrows,
+/// delimiters, and miscellaneous symbols.
 /// Returns `None` for anything it doesn't recognize.
 ///
 /// This is useful on its own if you just need symbol conversion without
@@ -858,6 +1420,7 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "theta" | "vartheta" => '\u{03B8}',
         "iota" => '\u{03B9}',
         "kappa" => '\u{03BA}',
+        "varkappa" => '\u{03F0}',
         "lambda" => '\u{03BB}',
         "mu" => '\u{03BC}',
         "nu" => '\u{03BD}',
@@ -872,6 +1435,7 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "chi" => '\u{03C7}',
         "psi" => '\u{03C8}',
         "omega" => '\u{03C9}',
+        "digamma" => '\u{03DD}',
         // Greek uppercase
         "Alpha" => '\u{0391}',
         "Beta" => '\u{0392}',
@@ -908,6 +1472,24 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "bullet" => '\u{2022}',
         "oplus" => '\u{2295}',
         "otimes" => '\u{2297}',
+        "ominus" => '\u{2296}',
+        "odot" => '\u{2299}',
+        "oslash" => '\u{2298}',
+        "dagger" | "dag" => '\u{2020}',
+        "ddagger" | "ddag" => '\u{2021}',
+        "sqcup" => '\u{2294}',
+        "sqcap" => '\u{2293}',
+        "uplus" => '\u{228E}',
+        "wr" => '\u{2240}',
+        "diamond" => '\u{22C4}',
+        "amalg" => '\u{2A3F}',
+        "bigcirc" => '\u{25EF}',
+        "triangleleft" => '\u{25C1}',
+        "triangleright" => '\u{25B7}',
+        "lhd" => '\u{22B2}',
+        "rhd" => '\u{22B3}',
+        "ltimes" => '\u{22C9}',
+        "rtimes" => '\u{22CA}',
         // Relations
         "leq" | "le" => '\u{2264}',
         "geq" | "ge" => '\u{2265}',
@@ -924,6 +1506,29 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "succ" => '\u{227B}',
         "perp" => '\u{22A5}',
         "parallel" => '\u{2225}',
+        "nparallel" => '\u{2226}',
+        "mid" => '\u{2223}',
+        "nmid" => '\u{2224}',
+        "nleq" => '\u{2270}',
+        "ngeq" => '\u{2271}',
+        "leqslant" => '\u{2A7D}',
+        "geqslant" => '\u{2A7E}',
+        "nless" => '\u{226E}',
+        "ngtr" => '\u{226F}',
+        "nequiv" => '\u{2262}',
+        "nsim" => '\u{2241}',
+        "ncong" => '\u{2247}',
+        "lesssim" => '\u{2272}',
+        "gtrsim" => '\u{2273}',
+        "coloneqq" => '\u{2254}',
+        "doteq" => '\u{2250}',
+        "asymp" => '\u{224D}',
+        "vdash" => '\u{22A2}',
+        "dashv" => '\u{22A3}',
+        "models" => '\u{22A8}',
+        "bowtie" => '\u{22C8}',
+        "smile" => '\u{2323}',
+        "frown" => '\u{2322}',
         // Logic & sets
         "forall" => '\u{2200}',
         "exists" => '\u{2203}',
@@ -938,6 +1543,13 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "supset" => '\u{2283}',
         "subseteq" => '\u{2286}',
         "supseteq" => '\u{2287}',
+        "subsetneq" => '\u{228A}',
+        "supsetneq" => '\u{228B}',
+        "nsubseteq" => '\u{2288}',
+        "nsupseteq" => '\u{2289}',
+        "sqsubseteq" => '\u{2291}',
+        "sqsupseteq" => '\u{2292}',
+        "complement" => '\u{2201}',
         "cup" => '\u{222A}',
         "cap" => '\u{2229}',
         "emptyset" | "varnothing" => '\u{2205}',
@@ -954,6 +1566,32 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "mapsto" => '\u{21A6}',
         "hookrightarrow" => '\u{21AA}',
         "hookleftarrow" => '\u{21A9}',
+        "longrightarrow" => '\u{27F6}',
+        "longleftarrow" => '\u{27F5}',
+        "longleftrightarrow" => '\u{27F7}',
+        "Longrightarrow" => '\u{27F9}',
+        "Longleftarrow" | "impliedby" => '\u{27F8}',
+        "Longleftrightarrow" => '\u{27FA}',
+        "longmapsto" => '\u{27FC}',
+        "Uparrow" => '\u{21D1}',
+        "Downarrow" => '\u{21D3}',
+        "updownarrow" => '\u{2195}',
+        "Updownarrow" => '\u{21D5}',
+        "nearrow" => '\u{2197}',
+        "searrow" => '\u{2198}',
+        "nwarrow" => '\u{2196}',
+        "swarrow" => '\u{2199}',
+        "rightleftharpoons" => '\u{21CC}',
+        "leftrightharpoons" => '\u{21CB}',
+        "rightharpoonup" => '\u{21C0}',
+        "rightharpoondown" => '\u{21C1}',
+        "leftharpoonup" => '\u{21BC}',
+        "leftharpoondown" => '\u{21BD}',
+        "nrightarrow" => '\u{219B}',
+        "nleftarrow" => '\u{219A}',
+        "nRightarrow" => '\u{21CF}',
+        "nLeftarrow" => '\u{21CD}',
+        "nLeftrightarrow" => '\u{21CE}',
         // Misc
         "infty" | "inf" => '\u{221E}',
         "partial" => '\u{2202}',
@@ -966,9 +1604,43 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "aleph" => '\u{2135}',
         "angle" => '\u{2220}',
         "triangle" => '\u{25B3}',
+        "triangledown" => '\u{25BD}',
+        "top" => '\u{22A4}',
+        "bot" => '\u{22A5}',
+        "square" | "Box" => '\u{25A1}',
+        "blacksquare" => '\u{25A0}',
+        "lozenge" => '\u{25CA}',
+        "bigstar" => '\u{2605}',
+        "checkmark" => '\u{2713}',
+        "therefore" => '\u{2234}',
+        "because" => '\u{2235}',
+        "imath" => '\u{0131}',
+        "jmath" => '\u{0237}',
+        "beth" => '\u{2136}',
+        "gimel" => '\u{2137}',
+        "daleth" => '\u{2138}',
+        "mho" => '\u{2127}',
+        "eth" => '\u{00F0}',
+        "flat" => '\u{266D}',
+        "sharp" => '\u{266F}',
+        "natural" => '\u{266E}',
+        "clubsuit" => '\u{2663}',
+        "diamondsuit" => '\u{2662}',
+        "heartsuit" => '\u{2661}',
+        "spadesuit" => '\u{2660}',
+        "surd" => '\u{221A}',
+        "measuredangle" => '\u{2221}',
+        "sphericalangle" => '\u{2222}',
+        "backprime" => '\u{2035}',
+        "copyright" => '\u{00A9}',
+        "pounds" => '\u{00A3}',
+        "S" => '\u{00A7}',
+        "P" => '\u{00B6}',
+        "colon" => ':',
         "degree" | "deg" => '\u{00B0}',
         "prime" => '\u{2032}',
         "dots" | "ldots" | "cdots" => '\u{22EF}',
+        "iddots" => '\u{22F0}',
         "vdots" => '\u{22EE}',
         "ddots" => '\u{22F1}',
         // Delimiters
@@ -978,6 +1650,13 @@ pub fn latex_to_unicode(name: &str) -> Option<String> {
         "rceil" => '\u{2309}',
         "lfloor" => '\u{230A}',
         "rfloor" => '\u{230B}',
+        "vert" | "lvert" | "rvert" => '|',
+        "Vert" | "lVert" | "rVert" => '\u{2016}',
+        "lbrace" => '{',
+        "rbrace" => '}',
+        "lbrack" => '[',
+        "rbrack" => ']',
+        "backslash" => '\\',
         _ => return None,
     };
     Some(ch.to_string())
