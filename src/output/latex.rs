@@ -55,8 +55,15 @@ impl Writer {
     /// Whether appending `token` to the trailing run of letters would read
     /// differently from the letters on their own.
     fn letters_would_merge(&self, token: &str) -> bool {
-        // Only the trailing run of ASCII letters matters (cheap even for long output).
-        let run_len = self.out.bytes().rev().take_while(|b| b.is_ascii_alphabetic()).count();
+        // Shortcut words are at most a dozen letters, so only the end of the
+        // run matters. Past a cap we just add a space, which is always safe;
+        // this keeps the check constant-time however long the run gets.
+        const CAP: usize = 64;
+        const LONGEST_WORD: usize = 16;
+        let run_len = self.out.bytes().rev().take(CAP + 1).take_while(|b| b.is_ascii_alphabetic()).count();
+        if run_len > CAP {
+            return true;
+        }
         let split = self.out.len() - run_len;
         let run = &self.out[split..];
         let before = self.out[..split].chars().next_back();
@@ -66,15 +73,15 @@ impl Writer {
             return !token.starts_with('(');
         }
         if token.starts_with('(') {
-            return (0..run.len()).any(|i| is_function_word(&run[i..]) || run[i..] == *"sqrt");
+            return (run.len().saturating_sub(LONGEST_WORD)..run.len())
+                .any(|i| is_function_word(&run[i..]) || run[i..] == *"sqrt");
         }
-        let joined: String = run.chars().chain(token.chars().take_while(|c| c.is_ascii_alphabetic())).collect();
-        // Any suffix of the joined run that starts in the old run and is a
-        // shortcut word would be read as that word.
-        (0..run.len()).any(|i| {
-            let tail = &joined[i..];
-            is_bareword(tail) || (1..tail.len()).any(|k| is_bareword(&tail[..k]) && i + k > run.len())
-        })
+        // The parser reads a shortcut word only when it ends a run of
+        // letters, so check the suffixes of the joined run that start in the
+        // old run.
+        let added: String = token.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+        let joined = format!("{}{}", run, added);
+        (run.len().saturating_sub(LONGEST_WORD)..run.len()).any(|i| is_bareword(&joined[i..]))
     }
 
     /// Append a space unless the output already ends with one.
@@ -171,9 +178,7 @@ impl Writer {
                     self.command(name);
                 } else {
                     self.command("operatorname");
-                    self.out.push('{');
-                    self.out.push_str(name);
-                    self.out.push('}');
+                    self.encoded_arg(name, true);
                 }
                 if let Some(l) = lower {
                     self.out.push('_');
@@ -390,10 +395,33 @@ impl Writer {
         self.arg(sup);
     }
 
-    /// The `{...}` argument of `\text` and friends, with braces escaped.
+    /// The `{...}` argument of `\text` and friends. Braces are escaped, and
+    /// a backslash that would otherwise escape a brace (or the closing brace)
+    /// is written `\textbackslash{}`, so the parser reads back exactly `t`.
     fn text_arg(&mut self, t: &str) {
+        self.encoded_arg(t, false);
+    }
+
+    /// Write `{t}` so the parser decodes it back to exactly `t`. With
+    /// `strict`, every backslash not starting a command name is encoded too
+    /// (operator names treat `\,` and friends as spaces).
+    fn encoded_arg(&mut self, t: &str, strict: bool) {
         self.out.push('{');
-        self.out.push_str(&t.replace('{', "\\{").replace('}', "\\}"));
+        let literal_backslashes = t.contains("\\textbackslash{}");
+        let mut chars = t.chars().peekable();
+        while let Some(c) = chars.next() {
+            match c {
+                '{' => self.out.push_str("\\{"),
+                '}' => self.out.push_str("\\}"),
+                '\\' if literal_backslashes
+                    || matches!(chars.peek(), None | Some('{') | Some('}'))
+                    || (strict && !chars.peek().is_some_and(|n| n.is_ascii_alphabetic())) =>
+                {
+                    self.out.push_str("\\textbackslash{}")
+                }
+                _ => self.out.push(c),
+            }
+        }
         self.out.push('}');
     }
 

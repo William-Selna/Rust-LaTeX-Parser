@@ -32,6 +32,26 @@ pub use svg::{to_svg, SvgFont, SvgOptions};
 #[cfg(feature = "unicode")]
 pub use unicode::to_unicode;
 
+/// Escape text for XML content and attribute values. Characters XML 1.0
+/// doesn't allow at all (NUL, most C0 controls, U+FFFE/U+FFFF) become
+/// U+FFFD, so the output always parses.
+#[cfg(any(feature = "mathml", feature = "svg"))]
+pub(crate) fn xml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\t' | '\n' | '\r' => out.push(c),
+            '\u{0}'..='\u{1F}' | '\u{FFFE}' | '\u{FFFF}' => out.push('\u{FFFD}'),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Whether an equation is set inline with text or as a display (block)
 /// equation on its own line. Used by `to_mathml` and `to_svg`.
 #[cfg(any(feature = "mathml", feature = "svg"))]

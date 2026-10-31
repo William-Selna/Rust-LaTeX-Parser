@@ -439,7 +439,8 @@ fn hspace_and_kern() {
 
 #[test]
 fn invalid_hspace_is_kept_as_text() {
-    assert_eq!(p("\\hspace{wide}"), "\\hspace{wide}");
+    // The command is kept as text and its argument parsed normally.
+    assert_eq!(p("\\hspace{wide}"), "(seq \\hspace (seq w i d e))");
 }
 
 #[test]

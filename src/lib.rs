@@ -110,6 +110,8 @@
 //! for native browser rendering, `to_svg` for images, and `to_unicode` for
 //! plain text.
 
+#![forbid(unsafe_code)]
+
 pub mod ast;
 pub mod output;
 pub mod parser;

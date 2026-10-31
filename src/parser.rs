@@ -245,7 +245,7 @@ fn is_operand(node: &Node) -> bool {
         EqNode::Op { .. } | EqNode::Space(_) | EqNode::BigOp { .. } | EqNode::Middle(_) => false,
         EqNode::Text(t) => !matches!(
             t.as_str(),
-            "" | "(" | "[" | "{" | "," | ";" | ":" | "|" | "-" | "+" | "\u{00B1}" | "\u{2213}" | "\u{2212}"
+            "" | "(" | "[" | "{" | "," | ";" | ":" | "|" | "/" | "-" | "+" | "\u{00B1}" | "\u{2213}" | "\u{2212}"
         ),
         _ => true,
     }
@@ -279,31 +279,9 @@ fn matching_open(nodes: &[Node], close: usize) -> Option<usize> {
 /// Also returns whether the numerator was glued to the node before it, and
 /// the source span it was taken from (including any dropped parentheses).
 fn take_numerator(nodes: &mut Vec<Node>, glued: &mut Vec<bool>, at: Span) -> (Node, bool, Span) {
-    let Some(last) = nodes.len().checked_sub(1) else {
+    let Some((start, single_group)) = numerator_start(nodes, glued) else {
         return (Node::new(EqNode::Text(String::new()), at), false, at);
     };
-    let mut start = last;
-    let is_close = |n: &Node| matches!(&n.kind, EqNode::Text(t) if t == ")");
-    if is_close(&nodes[last]) {
-        if let Some(open) = matching_open(nodes, last) {
-            start = open;
-        }
-    } else if !is_operand(&nodes[last]) {
-        let node = nodes.pop().unwrap();
-        let g = glued.pop().unwrap_or(false);
-        let span = node.span;
-        return (node, g, span);
-    }
-    let single_group = start != last && start == matching_open(nodes, last).unwrap_or(usize::MAX);
-    while start > 0 && glued.get(start).copied().unwrap_or(false) && is_operand(&nodes[start - 1]) {
-        start -= 1;
-        if is_close(&nodes[start]) {
-            match matching_open(nodes, start) {
-                Some(open) => start = open,
-                None => break,
-            }
-        }
-    }
     let was_glued = glued.get(start).copied().unwrap_or(false);
     glued.truncate(start);
     let mut taken: Vec<Node> = nodes.drain(start..).collect();
@@ -314,6 +292,34 @@ fn take_numerator(nodes: &mut Vec<Node>, glued: &mut Vec<bool>, at: Span) -> (No
         taken.remove(0);
     }
     (finish_nodes(taken, at), was_glued, source)
+}
+
+/// Where the numerator for a `/` starts in `nodes` (see [`take_numerator`]),
+/// and whether it is exactly one `(...)` group. `None` if `nodes` is empty.
+fn numerator_start(nodes: &[Node], glued: &[bool]) -> Option<(usize, bool)> {
+    let last = nodes.len().checked_sub(1)?;
+    let mut start = last;
+    let is_close = |n: &Node| matches!(&n.kind, EqNode::Text(t) if t == ")");
+    if is_close(&nodes[last]) {
+        if let Some(open) = matching_open(nodes, last) {
+            start = open;
+        }
+    } else if !is_operand(&nodes[last]) {
+        // Not an operand (an operator, an opening bracket): it alone
+        // becomes the numerator.
+        return Some((last, false));
+    }
+    let single_group = start != last;
+    while start > 0 && glued.get(start).copied().unwrap_or(false) && is_operand(&nodes[start - 1]) {
+        start -= 1;
+        if is_close(&nodes[start]) {
+            match matching_open(nodes, start) {
+                Some(open) => start = open,
+                None => break,
+            }
+        }
+    }
+    Some((start, single_group))
 }
 
 /// Join comma-separated argument parts back together with `,` text.
@@ -513,6 +519,30 @@ fn take_braced(chars: &[char], i: &mut usize) -> String {
         }
         out.push(c);
     }
+    out
+}
+
+/// Decode the raw argument of `\text{...}`: `\{` and `\}` are literal
+/// braces and `\textbackslash{}` is a backslash; everything else (including
+/// other commands) is kept as typed.
+fn decode_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(i) = rest.find('\\') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        if let Some(after) = rest.strip_prefix("\\textbackslash{}") {
+            out.push('\\');
+            rest = after;
+        } else if rest.starts_with("\\{") || rest.starts_with("\\}") {
+            out.push_str(&rest[1..2]);
+            rest = &rest[2..];
+        } else {
+            out.push('\\');
+            rest = &rest[1..];
+        }
+    }
+    out.push_str(rest);
     out
 }
 
@@ -750,6 +780,10 @@ impl EqParser {
         let mut glued: Vec<bool> = Vec::new();
         let mut after_space = false;
         let mut depth = 0usize;
+        // nests[i]: how deeply `/` fractions are nested inside nodes[i].
+        // `a/b/c/...` nests each fraction in the next one's numerator, so
+        // this keeps those chains under the depth limit.
+        let mut nests: Vec<usize> = Vec::new();
         while let Some(ch) = self.peek() {
             if ch == '%' {
                 self.skip_comment();
@@ -764,6 +798,7 @@ impl EqParser {
                         self.advance();
                         nodes.push(Node::new(EqNode::Text(ch.to_string()), self.span_from(start)));
                         glued.push(!after_space);
+                        nests.push(0);
                         after_space = false;
                         continue;
                     }
@@ -772,6 +807,7 @@ impl EqParser {
                         self.advance();
                         parts.push(finish_nodes(std::mem::take(&mut nodes), at));
                         glued.clear();
+                        nests.clear();
                         after_space = false;
                         continue;
                     }
@@ -834,12 +870,26 @@ impl EqParser {
                 }
             }
             if ch == '/' {
+                let start_idx = numerator_start(&nodes, &glued).map_or(nodes.len(), |(s, _)| s);
+                let nest = nests[start_idx..].iter().copied().max().unwrap_or(0) + 1;
+                if self.depth + nest >= MAX_DEPTH {
+                    // Too deeply chained: keep the slash as text.
+                    let start = self.pos;
+                    self.advance();
+                    nodes.push(Node::new(EqNode::Text("/".to_string()), self.span_from(start)));
+                    glued.push(!after_space);
+                    nests.push(0);
+                    after_space = false;
+                    continue;
+                }
+                nests.truncate(start_idx);
                 let slash = self.here();
                 self.advance();
                 let (numer, numer_glued, source) = take_numerator(&mut nodes, &mut glued, slash);
                 let denom = self.parse_denominator();
                 let span = source.to(slash).to(denom.span).to(self.here());
                 nodes.push(Node::new(EqNode::Frac(Box::new(numer), Box::new(denom)), span));
+                nests.push(nest);
                 glued.push(numer_glued && !after_space);
                 after_space = false;
                 continue;
@@ -848,6 +898,7 @@ impl EqParser {
             let node = self.parse_postfix(atom);
             push_node(&mut nodes, node);
             glued.push(!after_space);
+            nests.push(0);
             after_space = false;
         }
         parts.push(finish_nodes(nodes, self.here()));
@@ -925,8 +976,16 @@ impl EqParser {
     fn parse_group_atom(&mut self) -> Node {
         self.skip_whitespace();
         if self.peek() == Some('(') {
+            if self.depth >= MAX_DEPTH {
+                // Too deep: keep the bracket as text instead of recursing.
+                let start = self.pos;
+                self.advance();
+                return Node::new(EqNode::Text("(".to_string()), self.span_from(start));
+            }
             self.advance();
+            self.depth += 1;
             let inner = self.parse_seq(SeqMode::Paren).remove(0);
+            self.depth -= 1;
             if self.peek() == Some(')') {
                 self.advance();
             }
@@ -940,7 +999,9 @@ impl EqParser {
     /// Assumes the current char is `(`.
     fn parse_paren_args(&mut self) -> Vec<Node> {
         self.advance(); // '('
+        self.depth += 1;
         let parts = self.parse_seq(SeqMode::ParenArgs);
+        self.depth -= 1;
         if self.peek() == Some(')') {
             self.advance();
         }
@@ -1512,17 +1573,19 @@ impl EqParser {
         match name.as_str() {
             // \hspace{1em}, \hspace*{2pt}
             "hspace" => {
-                if self.peek() == Some('*') {
+                let star = self.peek() == Some('*');
+                if star {
                     self.advance();
                     self.skip_whitespace();
                 }
-                return match self.parse_brace_arg_opt() {
-                    Some(dim) => match parse_dimension(&dim) {
-                        Some(w) => EqNode::Space(w),
-                        None => EqNode::Text(format!("\\hspace{{{}}}", dim)),
-                    },
-                    None => EqNode::Text("\\hspace".to_string()),
-                };
+                let before_arg = self.pos;
+                if let Some(w) = self.parse_brace_arg_opt().as_deref().and_then(parse_dimension) {
+                    return EqNode::Space(w);
+                }
+                // Not a dimension: keep the command as text and let the
+                // argument be parsed as an ordinary group.
+                self.pos = before_arg;
+                return EqNode::Text(if star { "\\hspace*" } else { "\\hspace" }.to_string());
             }
             // \kern3mu, \mkern-2mu, \mskip 4mu, \hskip 1em
             "kern" | "mkern" | "mskip" | "hskip" => {
@@ -1585,7 +1648,7 @@ impl EqParser {
                     Some(raw) => raw,
                     None => self.advance().map(|c| c.to_string()).unwrap_or_default(),
                 };
-                let op_name: String = raw
+                let spaced: String = raw
                     .replace("\\,", " ")
                     .replace("\\;", " ")
                     .replace("\\:", " ")
@@ -1593,6 +1656,7 @@ impl EqParser {
                     .split_whitespace()
                     .collect::<Vec<_>>()
                     .join(" ");
+                let op_name = decode_text(&spaced);
                 let lower = self.parse_limit_lower();
                 return EqNode::Limit { name: op_name, lower: lower.map(Box::new) };
             }
@@ -1846,8 +1910,7 @@ impl EqParser {
     /// Parse \text{...} — consume braces and return raw text (no math parsing).
     fn parse_text_block(&mut self) -> EqNode {
         let raw = self.parse_brace_arg_opt().unwrap_or_default();
-        // `\{` and `\}` are literal braces in text; other content is kept raw.
-        EqNode::TextBlock(raw.replace("\\{", "{").replace("\\}", "}"))
+        EqNode::TextBlock(decode_text(&raw))
     }
 
     /// [`Self::parse_text_block`] as a node with its span.

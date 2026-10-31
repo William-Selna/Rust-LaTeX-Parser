@@ -43,17 +43,7 @@ struct Writer<'a> {
 
 /// Escape text for XML content and attribute values.
 fn escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(c),
-        }
-    }
-    out
+    super::xml_escape(s)
 }
 
 /// Names that take their limit underneath in display style.

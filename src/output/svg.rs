@@ -251,7 +251,7 @@ fn fmt(v: f32) -> String {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    super::xml_escape(s)
 }
 
 // ─── Layout primitives ──────────────────────────────────────────────
