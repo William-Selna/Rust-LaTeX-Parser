@@ -93,6 +93,6 @@ pub use ast::{
     AccentKind, ArrayColumn, EncloseKind, EqMetrics, EqNode, MathFontKind, MatrixKind, Node,
     OpKind, Span,
 };
-pub use output::{to_latex, to_mathml, to_unicode, MathDisplay};
+pub use output::{to_latex, to_mathml, to_svg, to_unicode, MathDisplay, SvgOptions};
 pub use parser::parse_equation;
 pub use symbols::{latex_to_unicode, op_kind, symbols, unicode_to_latex};
