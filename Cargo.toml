@@ -2,10 +2,10 @@
 name = "rust-latex-parser"
 version = "0.2.0"
 edition = "2021"
-description = "A LaTeX equation parser that produces an abstract syntax tree. Supports fractions, roots, matrices, aligned equations, arrays, big operators, Greek letters, accents, colors, and 270+ Unicode symbols — with convenient bareword syntax and lossless error recovery."
+description = "Math input for equation editors: parses LaTeX or plain notation (sqrt(x)/2 <= abs(y)) into an AST and writes LaTeX, MathML or Unicode. Never fails on half-typed input. No dependencies."
 license = "MIT"
 repository = "https://github.com/William-Selna/Rust-LaTeX-Parser"
-keywords = ["latex", "math", "equation", "parser", "ast"]
+keywords = ["latex", "math", "equation", "mathml", "parser"]
 categories = ["parser-implementations", "mathematics"]
 
 [dependencies]

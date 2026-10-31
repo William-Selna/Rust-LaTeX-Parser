@@ -2,17 +2,34 @@
 
 ## 0.2.0
 
+Math input for equation editors whose users may not know LaTeX: plain
+notation alongside LaTeX, a tree that records meaning rather than layout,
+and LaTeX, MathML and Unicode output.
+
 ### Breaking changes
 
-- `EqNode` has new variants: `Root`, `SizedDelim`, `Align`, `Gather`, `Array`,
-  `Color` and `Enclose`. `AccentKind` and `MathFontKind` also have new
-  variants, and there are two new enums, `EncloseKind` and `ArrayColumn`.
-- `EqNode`, `AccentKind`, `MathFontKind`, `MatrixKind`, `EncloseKind` and
-  `ArrayColumn` are now `#[non_exhaustive]`. Future releases can add syntax
-  without breaking your code.
+- **Operators are `Op` nodes.** `EqNode::Op { symbol, kind }` with
+  `OpKind::{Binary, Relation}` replaces the `Space(4.0), Text(op),
+  Space(4.0)` padding 0.1 inserted around operators. Spacing is now the
+  renderer's job. A sign with no left operand (`-x`, `a = -b`) is a unary
+  `Text("-")`.
+- **Whitespace produces no nodes.** 0.1 emitted a `Text(" ")` for every
+  space. `Space` is now only produced by explicit spacing commands (`\quad`,
+  `\,`, `\hspace{..}`).
+- **New variants:** `Op`, `Middle`, `Root`, `SizedDelim`, `Align`,
+  `Gather`, `Array`, `Color`, `Enclose`. `AccentKind` and `MathFontKind`
+  also have new variants, and there are new enums `OpKind`, `EncloseKind`
+  and `ArrayColumn`.
+- `EqNode` and the kind enums are now `#[non_exhaustive]`, so later releases
+  can add syntax without breaking your code.
+- `\bmod` is `Op("mod")`. `\xrightarrow` and friends are a `StackRel`
+  around an arrow `Op`, without `Space` padding.
 
-**To upgrade:** add a `_ =>` arm to each `match` on these enums. Handle the
-new variants explicitly if your renderer should support them.
+**To upgrade:**
+- Add a `_ =>` arm to each `match` on these enums.
+- Handle `Op` where you used to see `Space` + `Text` + `Space` around
+  operators.
+- Stop filtering out `Text(" ")` nodes; they no longer appear.
 
 ### Output changes
 
@@ -20,29 +37,62 @@ These change the tree for input that 0.1.x already accepted:
 
 - `\sqrt[n]{x}` produces `Root`. In 0.1.x it produced a broken `Sqrt`.
 - Environments that 0.1.x kept as literal text now produce real nodes:
-  `align`, `align*`, `aligned`, `split`, `alignat`, `alignedat`, `flalign`
-  and `eqnarray` produce `Align`. `gather` and `gathered` produce `Gather`.
-  `array` and `subarray` produce `Array`. `equation` is unwrapped.
-- Primes become superscripts: `f'` is `Sup(f, "′")` instead of `f` followed
-  by a literal `'`.
+  `align`, `aligned`, `split`, `alignat` and `eqnarray` produce `Align`.
+  `gather` produces `Gather`. `array` produces `Array`. `equation` is
+  unwrapped.
+- `\middle|` produces `Middle` instead of plain text, so it can stretch.
+- Primes become superscripts: `f'` is `Sup(f, "′")`.
 - `%` starts a comment that runs to the end of the line. Use `\%` for a
   literal percent sign.
+- **`/` takes whole operands.** In 0.1, only the single nodes either side of
+  the slash were used, so `ab/cd` was `a`, `b/c`, `d`. Now `/` takes:
+  - a parenthesized group, with the parentheses dropped: `(a+b)/(c+d)`
+  - a function application: `sin(x)/x`
+  - otherwise the run of adjacent operands: `dy/dx`, `n!/k!`
+
+  Whitespace ends a run.
+- `x^(n+1)` takes the whole parenthesized group as the superscript. In 0.1
+  the superscript was just `(`.
 - `\ldots` / `\dots` produce baseline `…` (U+2026) instead of `⋯`.
-  `\cdots` is unchanged. `\dotsc`, `\dotsb` and related commands are added.
+  `\cdots` is unchanged.
 - `\varsigma`, `\vartheta`, `\varpi` and `\varrho` map to their own glyphs
   (ς ϑ ϖ ϱ) instead of the plain letters.
 - `\|` produces `‖` instead of `|`.
-- `\notin`, `\ni`, `\parallel`, `\simeq`, `\mapsto`, `\hookrightarrow` and
-  `\hookleftarrow` get operator spacing like the other relations.
-- A run of whitespace (including newlines) becomes a single `Text(" ")`
-  node. Previously each character became its own node, and newlines were
-  kept as `Text("\n")`.
-- All whitespace after a command name is skipped, as in TeX. Previously
-  only one space was skipped.
+- All whitespace after a command name is skipped, as in TeX.
 
 ### Added
 
-- `\sqrt[n]{x}` (and the bareword `sqrt[n](x)`) as `Root`.
+**Plain notation** (where a shortcut clashes with a plausible LaTeX
+reading, LaTeX wins):
+- ASCII shortcuts: `<=` `>=` `->` `=>` `<=>` `<->` `+/-`. These are left to
+  LaTeX: `n!=1`, `x<-1` and `a+-b`.
+- Parentheses group scripts and big-operator limits: `x^(n+1)`,
+  `sum_(i=1)^n`.
+- Function-style shortcuts when `(` follows immediately:
+  - `abs`, `norm`, `floor`, `ceil`
+  - `sqrt`, `cbrt`, `root(n, x)`, `binom(n, k)`
+  - `hat`, `bar`, `vec`, `dot`, `ddot`, `tilde`, `ul`
+  - `text(...)`
+- `"quoted text"` is upright text. An unclosed quote runs to the end of the
+  input.
+- Typed or pasted Unicode:
+  - superscripts and subscripts (`x²`, `a₁`) and primes (`f′`)
+  - `√` `∛` `∜`, vulgar fractions (`½`)
+  - big operators with Unicode limits (`∫₀¹`)
+  - math letters (`ℝ` → `\mathbb{R}`)
+  - operator symbols, which get the same class as their commands
+- More words without a backslash: every distinct Greek letter, `infinity`,
+  `neq`, `leq`, `geq`, `subset(eq)`, `supset(eq)`, `notin`, `cdots`,
+  `ldots`.
+
+**Output formats** (in the new `output` module):
+- `to_latex`: canonical LaTeX using standard commands only. For valid
+  input it parses back to the same tree.
+- `to_mathml` with `MathDisplay::{Inline, Block}`: MathML Core for native
+  browser rendering. Unknown commands are wrapped in `<merror>`.
+- `to_unicode`: readable plain text (`x² + √(y + 1)`).
+
+**Syntax:**
 - `align`, `gather` and `array` environments as above. `array` supports
   column specs (`c|c`, `*{3}{c}`, `p{..}`, `@{..}`) and `\hline`. Also
   `\substack{...}`.
@@ -54,6 +104,13 @@ These change the tree for input that 0.1.x already accepted:
   `\grave`, `\breve`, `\check`, `\widecheck`, `\mathring` and `\dddot`.
 - Fonts: `\mathit`, `\mathnormal`, `\textit`, `\emph` and `\textsl`
   (`Italic`); `\boldsymbol`, `\bm` and `\pmb` (`BoldItalic`).
+- `\perp` is a relation. `\not` negates `⊢ ⊨ ⊑ ⊒ ≍` too.
+
+**API:**
+- `unicode_to_latex`, the reverse symbol lookup.
+- `symbols()`: every command and its character, for autocomplete or
+  palettes.
+- `op_kind()`: the operator class of a symbol.
 - `PartialEq` on `EqNode` and related types. `Eq` and `Hash` on the
   fieldless kind enums.
 

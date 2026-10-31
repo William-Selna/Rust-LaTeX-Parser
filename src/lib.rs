@@ -1,31 +1,42 @@
 //! # rust-latex-parser
 //!
-//! A LaTeX equation parser that produces an abstract syntax tree.
+//! Math input for Rust: parse LaTeX *or* plain notation into an [`EqNode`]
+//! tree, then write it back out as LaTeX, MathML or Unicode text.
 //!
-//! Feed it a string of LaTeX math markup, get back an [`EqNode`] tree. No
-//! rendering opinions, no font dependencies, no runtime allocation tricks —
-//! just parsing.
-//!
-//! The tree is yours to walk however you want: render to SVG, convert to
-//! MathML, draw on a Skia canvas, dump to a terminal. The crate doesn't care.
+//! Built for equation editors in rich-text apps, where input is usually
+//! half-finished and the person typing may not know LaTeX. The parser never
+//! fails and never drops what the user typed.
 //!
 //! # Quick start
 //!
 //! ```
-//! use rust_latex_parser::{parse_equation, EqNode};
+//! use rust_latex_parser::{parse_equation, to_latex, to_mathml, to_unicode, EqNode, MathDisplay};
 //!
-//! let tree = parse_equation("\\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}");
-//! assert!(matches!(tree, EqNode::Frac(_, _)));
+//! let tree = parse_equation("x = (-b +/- sqrt(b^2 - 4ac))/(2a)");
+//!
+//! assert_eq!(to_latex(&tree), r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}");
+//! assert_eq!(to_unicode(&tree), "x = (-b ± √(b² - 4ac))/2a");
+//! assert!(to_mathml(&tree, MathDisplay::Block).starts_with("<math"));
+//!
+//! // Or walk the tree yourself.
+//! assert!(matches!(&tree, EqNode::Seq(nodes) if matches!(nodes[2], EqNode::Frac(..))));
 //! ```
 //!
-//! # Bareword shortcuts
+//! # Plain notation
 //!
-//! You don't always need backslashes. The parser recognizes common names as
-//! barewords, so `pi` works the same as `\pi`, `sqrt(x)` works like
-//! `\sqrt{x}`, and `int_0^1` works like `\int_0^1`.
+//! Alongside LaTeX, the parser accepts what people type when they don't know
+//! it. Where a shortcut would clash with a plausible LaTeX reading, LaTeX
+//! wins (`n!=1` is "n factorial equals 1").
 //!
-//! Parentheses after bareword operators act as invisible grouping:
-//! `sqrt(x+1)` parses the full `x+1` as the argument.
+//! | Type | Get |
+//! |------|-----|
+//! | `pi`, `alpha`, `infinity`, `leq` | `π`, `α`, `∞`, `≤` |
+//! | `<=` `>=` `->` `=>` `<=>` `+/-` | `≤` `≥` `→` `⇒` `⇔` `±` |
+//! | `x^(n+1)`, `sum_(i=1)^n` | parentheses group the script |
+//! | `(a+b)/(c+d)`, `dy/dx`, `sin(x)/x` | fractions of whole operands |
+//! | `sqrt(x)`, `root(3, x)`, `abs(x)`, `floor(x)`, `hat(x)`, `binom(n, k)` | function-style shortcuts |
+//! | `"text"`, `text(if)` | upright text |
+//! | `x²`, `a₁`, `√x`, `½`, `∑`, `≤`, `ℝ` | typed or pasted Unicode |
 //!
 //! # Supported syntax
 //!
@@ -64,6 +75,12 @@
 //! The only things discarded are those LaTeX itself treats as invisible:
 //! `%` comments and presentational commands like `\displaystyle`,
 //! `\limits` and `\label{...}`.
+//!
+//! # Output
+//!
+//! See the [`output`] module: [`to_latex`] for canonical LaTeX,
+//! [`to_mathml`] for native browser rendering, and [`to_unicode`] for plain
+//! text.
 
 pub mod ast;
 pub mod output;
