@@ -24,8 +24,8 @@ fn ascii_relations() {
 #[test]
 fn ascii_shortcuts_are_relation_ops() {
     assert!(matches!(
-        parse_equation("a<=b"),
-        EqNode::Seq(v) if v[1] == EqNode::Op { symbol: "≤".into(), kind: OpKind::Relation }
+        parse_equation("a<=b").kind,
+        EqNode::Seq(v) if v[1].kind == EqNode::Op { symbol: "≤".into(), kind: OpKind::Relation }
     ));
 }
 
@@ -187,8 +187,8 @@ fn unicode_roots_and_fractions() {
 fn unicode_operators_and_big_operators() {
     assert_eq!(p("x ≤ y"), "(seq x ≤ y)");
     assert!(matches!(
-        parse_equation("a × b"),
-        EqNode::Seq(v) if v[1] == EqNode::Op { symbol: "×".into(), kind: OpKind::Binary }
+        parse_equation("a × b").kind,
+        EqNode::Seq(v) if v[1].kind == EqNode::Op { symbol: "×".into(), kind: OpKind::Binary }
     ));
     assert_eq!(p("∑_(k=0)^n k"), "(seq (bigop ∑ (seq k = 0) n) k)");
     assert_eq!(p("∫_0^1"), "(bigop ∫ 0 1)");

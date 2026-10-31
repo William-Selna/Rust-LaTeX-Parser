@@ -19,7 +19,7 @@ use crate::symbols::{op_kind, unicode_to_latex};
 ///
 /// Parsing the output gives back an equivalent tree, so
 /// `to_latex(&parse_equation(&to_latex(&t)))` equals `to_latex(&t)`.
-pub fn to_latex(node: &EqNode) -> String {
+pub fn to_latex(node: &Node) -> String {
     let mut w = Writer::default();
     w.node(node);
     w.out.trim().to_string()
@@ -55,9 +55,11 @@ impl Writer {
     /// Whether appending `token` to the trailing run of letters would read
     /// differently from the letters on their own.
     fn letters_would_merge(&self, token: &str) -> bool {
-        let run_len = self.out.chars().rev().take_while(|c| c.is_ascii_alphabetic()).count();
-        let run: String = self.out.chars().skip(self.out.chars().count() - run_len).collect();
-        let before = self.out.chars().rev().nth(run_len);
+        // Only the trailing run of ASCII letters matters (cheap even for long output).
+        let run_len = self.out.bytes().rev().take_while(|b| b.is_ascii_alphabetic()).count();
+        let split = self.out.len() - run_len;
+        let run = &self.out[split..];
+        let before = self.out[..split].chars().next_back();
         if matches!(before, Some('\\') | Some('^') | Some('_')) {
             // After a command name or a one-letter script (`x^n y`), letters
             // need a space; `(` doesn't (`\sin(x)`).
@@ -83,7 +85,7 @@ impl Writer {
     }
 
     /// `{...}` around a sub-tree.
-    fn group(&mut self, node: &EqNode) {
+    fn group(&mut self, node: &Node) {
         let inner = to_latex(node);
         self.emit("{");
         self.out.push_str(&inner);
@@ -92,8 +94,8 @@ impl Writer {
 
     /// A script or argument: bare if it is a single letter or digit,
     /// otherwise braced.
-    fn arg(&mut self, node: &EqNode) {
-        match node {
+    fn arg(&mut self, node: &Node) {
+        match &node.kind {
             EqNode::Text(t) if t.chars().count() == 1 && t.chars().all(|c| c.is_ascii_alphanumeric()) => {
                 self.out.push_str(t)
             }
@@ -106,8 +108,8 @@ impl Writer {
         self.out.push_str(name);
     }
 
-    fn node(&mut self, node: &EqNode) {
-        match node {
+    fn node(&mut self, node: &Node) {
+        match &node.kind {
             EqNode::Text(t) => self.text(t),
             EqNode::Op { symbol, .. } => {
                 self.space();
@@ -210,7 +212,7 @@ impl Writer {
                 self.text_arg(t);
             }
             EqNode::MathFont { kind, content } => {
-                if let EqNode::TextBlock(t) = content.as_ref() {
+                if let EqNode::TextBlock(t) = &content.kind {
                     let name = match kind {
                         MathFontKind::Bold => Some("textbf"),
                         MathFontKind::Italic | MathFontKind::BoldItalic => Some("textit"),
@@ -272,7 +274,7 @@ impl Writer {
                 self.environment(env, "", rows, &[]);
             }
             EqNode::Cases { rows } => {
-                let rows: Vec<Vec<EqNode>> = rows
+                let rows: Vec<Vec<Node>> = rows
                     .iter()
                     .map(|(v, c)| {
                         let mut r = vec![v.clone()];
@@ -284,7 +286,7 @@ impl Writer {
             }
             EqNode::Align { rows } => self.environment("aligned", "", rows, &[]),
             EqNode::Gather { rows } => {
-                let rows: Vec<Vec<EqNode>> = rows.iter().map(|r| vec![r.clone()]).collect();
+                let rows: Vec<Vec<Node>> = rows.iter().map(|r| vec![r.clone()]).collect();
                 self.environment("gathered", "", &rows, &[]);
             }
             EqNode::Array { columns, rows, hlines } => {
@@ -313,7 +315,7 @@ impl Writer {
                 }
             }
             EqNode::StackRel { base, annotation, over } => {
-                let is_rel = matches!(base.as_ref(), EqNode::Op { .. });
+                let is_rel = matches!(&base.kind, EqNode::Op { .. });
                 if is_rel {
                     self.space();
                 }
@@ -346,14 +348,14 @@ impl Writer {
 
     /// The base of a script: braced unless it's a single atom. Trailing
     /// spaces are dropped so primes stay attached (`\sum'`).
-    fn base(&mut self, base: &EqNode) {
+    fn base(&mut self, base: &Node) {
         self.base_inner(base);
         let trimmed = self.out.trim_end().len();
         self.out.truncate(trimmed);
     }
 
-    fn base_inner(&mut self, base: &EqNode) {
-        match base {
+    fn base_inner(&mut self, base: &Node) {
+        match &base.kind {
             EqNode::Seq(_) | EqNode::Sup(..) | EqNode::Sub(..) | EqNode::SupSub(..) => self.group(base),
             // An operator with a script (`+^2`) is written bare; braces would
             // make it a unary sign.
@@ -366,8 +368,8 @@ impl Writer {
     }
 
     /// A superscript, writing leading primes as `'`.
-    fn superscript(&mut self, sup: &EqNode) {
-        let primes = |n: &EqNode| match n {
+    fn superscript(&mut self, sup: &Node) {
+        let primes = |n: &Node| match &n.kind {
             EqNode::Text(t) if !t.is_empty() && t.chars().all(|c| c == '\u{2032}') => Some(t.chars().count()),
             _ => None,
         };
@@ -375,10 +377,10 @@ impl Writer {
             self.out.push_str(&"'".repeat(n));
             return;
         }
-        if let EqNode::Seq(v) = sup {
+        if let EqNode::Seq(v) = &sup.kind {
             if let Some(n) = v.first().and_then(primes) {
                 self.out.push_str(&"'".repeat(n));
-                let rest = if v.len() == 2 { v[1].clone() } else { EqNode::Seq(v[1..].to_vec()) };
+                let rest = if v.len() == 2 { v[1].clone() } else { Node::from(EqNode::Seq(v[1..].to_vec())) };
                 self.out.push('^');
                 self.arg(&rest);
                 return;
@@ -479,7 +481,7 @@ impl Writer {
         }
     }
 
-    fn environment(&mut self, env: &str, args: &str, rows: &[Vec<EqNode>], hlines: &[usize]) {
+    fn environment(&mut self, env: &str, args: &str, rows: &[Vec<Node>], hlines: &[usize]) {
         self.command("begin");
         self.out.push('{');
         self.out.push_str(env);
@@ -511,6 +513,6 @@ impl Writer {
     }
 }
 
-fn is_single_char(node: &EqNode) -> bool {
-    matches!(node, EqNode::Text(t) if t.chars().count() == 1)
+fn is_single_char(node: &Node) -> bool {
+    matches!(&node.kind, EqNode::Text(t) if t.chars().count() == 1)
 }

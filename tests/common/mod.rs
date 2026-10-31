@@ -1,22 +1,22 @@
 //! Shared helpers for integration tests.
 #![allow(dead_code)]
 
-use rust_latex_parser::{parse_equation, EqNode};
+use rust_latex_parser::{parse_equation, EqNode, Node};
 
 /// Render a tree as a compact S-expression, ignoring spacing so tests can
 /// focus on structure. Whitespace-only text and `Space` nodes are dropped
 /// and single-element sequences are unwrapped.
-pub fn sx(node: &EqNode) -> String {
-    fn opt(n: &Option<Box<EqNode>>) -> String {
+pub fn sx(node: &Node) -> String {
+    fn opt(n: &Option<Box<Node>>) -> String {
         n.as_ref().map(|n| sx(n)).unwrap_or_else(|| "_".to_string())
     }
-    fn rows(rows: &[Vec<EqNode>]) -> String {
+    fn rows(rows: &[Vec<Node>]) -> String {
         rows.iter()
             .map(|r| format!("[{}]", r.iter().map(sx).collect::<Vec<_>>().join(" ")))
             .collect::<Vec<_>>()
             .join(" ")
     }
-    match node {
+    match &node.kind {
         EqNode::Text(s) => s.clone(),
         EqNode::Op { symbol, .. } => symbol.clone(),
         EqNode::Space(_) => String::new(),
@@ -73,15 +73,15 @@ pub fn p(input: &str) -> String {
 
 /// Concatenate every piece of visible text in the tree (text, symbols,
 /// operator names, delimiters, colors...), in no particular order.
-pub fn all_text(node: &EqNode) -> String {
+pub fn all_text(node: &Node) -> String {
     let mut out = String::new();
     collect(node, &mut out);
     out
 }
 
-fn collect(node: &EqNode, out: &mut String) {
-    let mut each = |n: &EqNode| collect(n, out);
-    match node {
+fn collect(node: &Node, out: &mut String) {
+    let mut each = |n: &Node| collect(n, out);
+    match &node.kind {
         EqNode::Text(s) | EqNode::TextBlock(s) | EqNode::Op { symbol: s, .. } => out.push_str(s),
         EqNode::Space(_) => {}
         EqNode::Seq(v) => v.iter().for_each(each),

@@ -33,7 +33,7 @@ pub enum MathDisplay {
 ///     r#"<math xmlns="http://www.w3.org/1998/Math/MathML"><msup><mi>x</mi><mn>2</mn></msup></math>"#
 /// );
 /// ```
-pub fn to_mathml(node: &EqNode, display: MathDisplay) -> String {
+pub fn to_mathml(node: &Node, display: MathDisplay) -> String {
     let mut out = String::from("<math xmlns=\"http://www.w3.org/1998/Math/MathML\"");
     if display == MathDisplay::Block {
         out.push_str(" display=\"block\"");
@@ -104,8 +104,8 @@ impl Writer<'_> {
         self.leaf("mo", &display_symbol(symbol));
     }
 
-    fn node(&mut self, node: &EqNode) {
-        match node {
+    fn node(&mut self, node: &Node) {
+        match &node.kind {
             EqNode::Text(t) => self.text(t),
             EqNode::Op { symbol, .. } => self.mo(symbol),
             EqNode::Space(w) => {
@@ -177,7 +177,7 @@ impl Writer<'_> {
                 }),
             },
             EqNode::Accent(content, kind) => {
-                let stretchy = !matches!(content.as_ref(), EqNode::Text(t) if t.chars().count() <= 1);
+                let stretchy = !matches!(&content.kind, EqNode::Text(t) if t.chars().count() <= 1);
                 let mark = match kind {
                     AccentKind::Bar if stretchy => "\u{203E}",
                     _ => accent_mark(*kind),
@@ -253,7 +253,7 @@ impl Writer<'_> {
                 });
             }
             EqNode::Cases { rows } => {
-                let rows: Vec<Vec<EqNode>> = rows
+                let rows: Vec<Vec<Node>> = rows
                     .iter()
                     .map(|(v, c)| {
                         let mut r = vec![v.clone()];
@@ -270,7 +270,7 @@ impl Writer<'_> {
                 self.table(rows, |j| if j % 2 == 0 { "right" } else { "left" }, &[], &[]);
             }
             EqNode::Gather { rows } => {
-                let rows: Vec<Vec<EqNode>> = rows.iter().map(|r| vec![r.clone()]).collect();
+                let rows: Vec<Vec<Node>> = rows.iter().map(|r| vec![r.clone()]).collect();
                 self.table(&rows, |_| "center", &[], &[]);
             }
             EqNode::Array { columns, rows, hlines } => {
@@ -357,7 +357,7 @@ impl Writer<'_> {
 
     /// An `<mtable>`. `align(j)` gives column j's alignment; `vlines` are
     /// column boundaries with a vertical rule; `hlines` rows with a rule above.
-    fn table(&mut self, rows: &[Vec<EqNode>], align: impl Fn(usize) -> &'static str, vlines: &[usize], hlines: &[usize]) {
+    fn table(&mut self, rows: &[Vec<Node>], align: impl Fn(usize) -> &'static str, vlines: &[usize], hlines: &[usize]) {
         let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
         self.out.push_str("<mtable>");
         for (i, row) in rows.iter().enumerate() {

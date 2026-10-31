@@ -211,7 +211,40 @@ fn every_top_level_char_survives_plain_input() {
 
 #[test]
 fn deeply_nested_environments_terminate() {
+    let input = "\\begin{pmatrix}".repeat(30) + "x" + &"\\end{pmatrix}".repeat(30);
+    let node = parse_equation(&input);
+    assert!(matches!(node.kind, EqNode::Matrix { .. }));
+}
+
+#[test]
+fn nesting_beyond_the_limit_is_kept_as_text() {
+    // Past the nesting limit the parser stops building structure, but
+    // nothing is dropped and the outer structure is still there.
     let input = "\\begin{pmatrix}".repeat(100) + "x" + &"\\end{pmatrix}".repeat(100);
     let node = parse_equation(&input);
-    assert!(matches!(node, EqNode::Matrix { .. }));
+    match &node.kind {
+        EqNode::Seq(parts) => assert!(matches!(parts[0].kind, EqNode::Matrix { .. })),
+        other => panic!("{:?}", other),
+    }
+    assert!(all_text(&node).contains('x'));
+}
+
+#[test]
+fn extremely_deep_input_does_not_overflow_the_stack() {
+    let inputs = [
+        "{".repeat(5000) + "x" + &"}".repeat(5000),
+        "\\begin{pmatrix}".repeat(5000) + "x" + &"\\end{pmatrix}".repeat(5000),
+        "\\left(".repeat(5000) + "x" + &"\\right)".repeat(5000),
+        "sqrt(".repeat(5000) + "x",
+        "x^{".repeat(5000) + "2",
+        "\\color{red}a".repeat(5000),
+        "a \\over ".repeat(5000) + "b",
+    ];
+    // Test threads have a 2 MB stack.
+    for input in inputs {
+        let node = parse_equation(&input);
+        let _ = rust_latex_parser::to_latex(&node);
+        let _ = rust_latex_parser::to_mathml(&node, rust_latex_parser::MathDisplay::Block);
+        let _ = rust_latex_parser::to_unicode(&node);
+    }
 }

@@ -35,10 +35,10 @@ fn empty_root_index_is_plain_sqrt() {
 
 #[test]
 fn root_node_fields() {
-    match parse_equation("\\sqrt[3]{8}") {
+    match parse_equation("\\sqrt[3]{8}").kind {
         EqNode::Root { index, content } => {
-            assert_eq!(*index, EqNode::Text("3".into()));
-            assert_eq!(*content, EqNode::Text("8".into()));
+            assert_eq!(index.kind, EqNode::Text("3".into()));
+            assert_eq!(content.kind, EqNode::Text("8".into()));
         }
         other => panic!("expected Root, got {:?}", other),
     }
@@ -117,8 +117,8 @@ fn modular_arithmetic() {
     assert_eq!(p("a \\equiv b \\pmod{n}"), "(seq a ≡ b (seq ( (limit mod _) n )))");
     assert_eq!(p("a \\bmod b"), "(seq a mod b)");
     assert!(matches!(
-        parse_equation("a \\bmod b"),
-        EqNode::Seq(v) if matches!(&v[1], EqNode::Op { symbol, kind: OpKind::Binary } if symbol == "mod")
+        parse_equation("a \\bmod b").kind,
+        EqNode::Seq(v) if matches!(&v[1].kind, EqNode::Op { symbol, kind: OpKind::Binary } if symbol == "mod")
     ));
     assert_eq!(p("a \\mod{n}"), "(seq a (seq (limit mod _) n))");
 }
@@ -181,7 +181,7 @@ fn array_with_column_spec_and_hlines() {
 
 #[test]
 fn array_column_spec_forms() {
-    match parse_equation("\\begin{array}{*{3}{c}|l@{\\hspace{1em}}rp{2cm}} \\end{array}") {
+    match parse_equation("\\begin{array}{*{3}{c}|l@{\\hspace{1em}}rp{2cm}} \\end{array}").kind {
         EqNode::Array { columns, .. } => assert_eq!(
             columns,
             vec![
@@ -308,7 +308,7 @@ fn new_accent_kinds() {
         ("dddot", AccentKind::TripleDot),
     ];
     for (cmd, kind) in cases {
-        match parse_equation(&format!("\\{}{{x}}", cmd)) {
+        match parse_equation(&format!("\\{}{{x}}", cmd)).kind {
             EqNode::Accent(_, k) => assert_eq!(k, kind, "{}", cmd),
             other => panic!("\\{}: expected Accent, got {:?}", cmd, other),
         }
@@ -324,7 +324,7 @@ fn new_math_fonts() {
         ("mathscr", MathFontKind::Calligraphic),
     ];
     for (cmd, kind) in cases {
-        match parse_equation(&format!("\\{}{{x}}", cmd)) {
+        match parse_equation(&format!("\\{}{{x}}", cmd)).kind {
             EqNode::MathFont { kind: k, .. } => assert_eq!(k, kind, "{}", cmd),
             other => panic!("\\{}: expected MathFont, got {:?}", cmd, other),
         }
@@ -349,7 +349,7 @@ fn boxed_and_cancel() {
     assert_eq!(p("\\bcancel{x}"), "(enclose BackCancel x)");
     assert_eq!(p("\\xcancel{x}"), "(enclose XCancel x)");
     assert!(matches!(
-        parse_equation("\\cancel{x}"),
+        parse_equation("\\cancel{x}").kind,
         EqNode::Enclose { kind: EncloseKind::Cancel, .. }
     ));
 }
@@ -425,7 +425,7 @@ fn style_commands_are_ignored() {
 #[test]
 fn hspace_and_kern() {
     fn width(src: &str) -> f32 {
-        match parse_equation(src) {
+        match parse_equation(src).kind {
             EqNode::Space(w) => w,
             other => panic!("{}: expected Space, got {:?}", src, other),
         }
@@ -460,8 +460,8 @@ fn arguments_after_whitespace() {
 #[test]
 fn whitespace_produces_no_nodes() {
     assert_eq!(
-        parse_equation("a \n\t b"),
-        EqNode::Seq(vec![EqNode::Text("a".into()), EqNode::Text("b".into())])
+        parse_equation("a \n\t b").kind,
+        EqNode::Seq(vec![EqNode::Text("a".into()).into(), EqNode::Text("b".into()).into()])
     );
 }
 
@@ -485,9 +485,9 @@ fn new_symbols() {
 #[test]
 fn new_relations_are_relation_ops() {
     for (src, sym) in [("a \\mid b", "∣"), ("a \\leqslant b", "⩽"), ("A \\subsetneq B", "⊊"), ("x \\longrightarrow y", "⟶"), ("p \\models q", "⊨")] {
-        match parse_equation(src) {
+        match parse_equation(src).kind {
             EqNode::Seq(nodes) => assert_eq!(
-                nodes[1],
+                nodes[1].kind,
                 EqNode::Op { symbol: sym.to_string(), kind: OpKind::Relation },
                 "{}",
                 src

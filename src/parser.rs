@@ -36,6 +36,12 @@ pub const BIG_OP_COMMANDS: &[&str] = &[
     "bigsqcup", "bigvee", "bigwedge",
 ];
 
+/// How deeply structures may nest (atoms inside atoms) before the parser
+/// stops building structure and keeps the rest as plain text. Real
+/// equations stay far below this; it guarantees deeply nested or malicious
+/// input can't overflow the stack.
+pub(crate) const MAX_DEPTH: usize = 48;
+
 /// Commands that only affect presentation and have no visible output of
 /// their own. They are consumed without producing a node.
 const NOOP_COMMANDS: &[&str] = &[
@@ -94,9 +100,9 @@ fn symbol_node(symbol: String) -> EqNode {
 
 /// Push a node onto a sequence. A binary operator with no operand on its
 /// left (`-x`, `a = -b`, `(+1)`) becomes a unary [`EqNode::Text`].
-fn push_node(nodes: &mut Vec<EqNode>, node: EqNode) {
-    if let EqNode::Op { symbol, kind: OpKind::Binary } = &node {
-        let left = nodes.iter().rev().find(|n| !matches!(n, EqNode::Space(_)));
+fn push_node(nodes: &mut Vec<Node>, mut node: Node) {
+    if let EqNode::Op { symbol, kind: OpKind::Binary } = &node.kind {
+        let left = nodes.iter().rev().map(|n| &n.kind).find(|n| !matches!(n, EqNode::Space(_)));
         let has_left_operand = match left {
             None => false,
             Some(EqNode::Op { .. }) | Some(EqNode::BigOp { .. }) | Some(EqNode::Limit { .. }) | Some(EqNode::Middle(_)) => false,
@@ -104,8 +110,7 @@ fn push_node(nodes: &mut Vec<EqNode>, node: EqNode) {
             Some(_) => true,
         };
         if !has_left_operand {
-            nodes.push(EqNode::Text(symbol.clone()));
-            return;
+            node.kind = EqNode::Text(symbol.clone());
         }
     }
     nodes.push(node);
@@ -199,9 +204,10 @@ fn negate_symbol(s: &str) -> String {
     negated.to_string()
 }
 
-/// Apply `\not` to an already-parsed atom.
-fn negate_node(node: EqNode) -> EqNode {
-    match node {
+/// Apply `\not` to an already-parsed atom. `not_span` is the span of the
+/// `\not` itself, used if it has to be kept as text.
+fn negate_node(node: Node, not_span: Span) -> EqNode {
+    match node.kind {
         // Ordinary symbols are only negated if they have a precomposed
         // negation (`\not\exists` is `∄`); `\not` before anything else is
         // kept as text.
@@ -210,7 +216,10 @@ fn negate_node(node: EqNode) -> EqNode {
         }
         EqNode::Op { symbol, .. } => symbol_node(negate_symbol(&symbol)),
         EqNode::Text(s) if s.is_empty() => EqNode::Text("\\not".to_string()),
-        other => EqNode::Seq(vec![EqNode::Text("\\not".to_string()), other]),
+        other => EqNode::Seq(vec![
+            Node::new(EqNode::Text("\\not".to_string()), not_span),
+            Node::new(other, node.span),
+        ]),
     }
 }
 
@@ -229,8 +238,8 @@ enum SeqMode {
 
 /// Whether a node can be part of a fraction operand. Operators,
 /// separators, opening brackets and big operators end an operand.
-fn is_operand(node: &EqNode) -> bool {
-    match node {
+fn is_operand(node: &Node) -> bool {
+    match &node.kind {
         EqNode::Op { .. } | EqNode::Space(_) | EqNode::BigOp { .. } | EqNode::Middle(_) => false,
         EqNode::Text(t) => !matches!(
             t.as_str(),
@@ -241,10 +250,10 @@ fn is_operand(node: &EqNode) -> bool {
 }
 
 /// Index of the `(` matching the `)` at `close`, if any.
-fn matching_open(nodes: &[EqNode], close: usize) -> Option<usize> {
+fn matching_open(nodes: &[Node], close: usize) -> Option<usize> {
     let mut depth = 0usize;
     for i in (0..=close).rev() {
-        match &nodes[i] {
+        match &nodes[i].kind {
             EqNode::Text(t) if t == ")" => depth += 1,
             EqNode::Text(t) if t == "(" => {
                 depth -= 1;
@@ -265,13 +274,14 @@ fn matching_open(nodes: &[EqNode], close: usize) -> Option<usize> {
 /// operand (`sin(x)/x`, `2(a+b)/c`). If the whole numerator is a single
 /// `(...)` group, its parentheses are dropped: `(a+b)/(c+d)`.
 ///
-/// Also returns whether the numerator was glued to the node before it.
-fn take_numerator(nodes: &mut Vec<EqNode>, glued: &mut Vec<bool>) -> (EqNode, bool) {
+/// Also returns whether the numerator was glued to the node before it, and
+/// the source span it was taken from (including any dropped parentheses).
+fn take_numerator(nodes: &mut Vec<Node>, glued: &mut Vec<bool>, at: Span) -> (Node, bool, Span) {
     let Some(last) = nodes.len().checked_sub(1) else {
-        return (EqNode::Text(String::new()), false);
+        return (Node::new(EqNode::Text(String::new()), at), false, at);
     };
     let mut start = last;
-    let is_close = |n: &EqNode| matches!(n, EqNode::Text(t) if t == ")");
+    let is_close = |n: &Node| matches!(&n.kind, EqNode::Text(t) if t == ")");
     if is_close(&nodes[last]) {
         if let Some(open) = matching_open(nodes, last) {
             start = open;
@@ -279,7 +289,8 @@ fn take_numerator(nodes: &mut Vec<EqNode>, glued: &mut Vec<bool>) -> (EqNode, bo
     } else if !is_operand(&nodes[last]) {
         let node = nodes.pop().unwrap();
         let g = glued.pop().unwrap_or(false);
-        return (node, g);
+        let span = node.span;
+        return (node, g, span);
     }
     let single_group = start != last && start == matching_open(nodes, last).unwrap_or(usize::MAX);
     while start > 0 && glued.get(start).copied().unwrap_or(false) && is_operand(&nodes[start - 1]) {
@@ -293,28 +304,37 @@ fn take_numerator(nodes: &mut Vec<EqNode>, glued: &mut Vec<bool>) -> (EqNode, bo
     }
     let was_glued = glued.get(start).copied().unwrap_or(false);
     glued.truncate(start);
-    let mut taken: Vec<EqNode> = nodes.drain(start..).collect();
-    if single_group && matches!(taken.first(), Some(EqNode::Text(t)) if t == "(") && matching_open(&taken, taken.len() - 1) == Some(0) {
+    let mut taken: Vec<Node> = nodes.drain(start..).collect();
+    let source = cover(&taken, at);
+    let opens_group = matches!(taken.first().map(|n| &n.kind), Some(EqNode::Text(t)) if t == "(");
+    if single_group && opens_group && matching_open(&taken, taken.len() - 1) == Some(0) {
         taken.pop();
         taken.remove(0);
     }
-    (finish_nodes(taken), was_glued)
+    (finish_nodes(taken, at), was_glued, source)
 }
 
 /// Join comma-separated argument parts back together with `,` text.
-fn join_parts(parts: Vec<EqNode>) -> EqNode {
-    let mut out = Vec::new();
+fn join_parts(parts: Vec<Node>, at: Span) -> Node {
+    let mut out: Vec<Node> = Vec::new();
     for (i, part) in parts.into_iter().enumerate() {
         if i > 0 {
-            out.push(EqNode::Text(",".to_string()));
+            out.push(between(out.last(), Some(&part), ","));
         }
-        match part {
+        match part.kind {
             EqNode::Seq(v) => out.extend(v),
-            EqNode::Text(t) if t.is_empty() => {}
-            other => out.push(other),
+            EqNode::Text(ref t) if t.is_empty() => {}
+            _ => out.push(part),
         }
     }
-    finish_nodes(out)
+    finish_nodes(out, at)
+}
+
+/// A separator text node (`,` or `&`) placed in the gap between two nodes.
+fn between(prev: Option<&Node>, next: Option<&Node>, text: &str) -> Node {
+    let start = prev.map(|n| n.span.end).unwrap_or(0);
+    let end = next.map(|n| n.span.start).unwrap_or(start).max(start);
+    Node::new(EqNode::Text(text.to_string()), Span::new(start, end))
 }
 
 /// A Unicode superscript or subscript character, as `(is_superscript, plain char)`.
@@ -373,28 +393,64 @@ const FUNCTION_WORDS: &[&str] = &[
     "hat", "bar", "vec", "dot", "ddot", "tilde", "ul",
 ];
 
-/// Collapse a node list into a single node.
-fn finish_nodes(mut nodes: Vec<EqNode>) -> EqNode {
+/// The span covering a list of nodes (ignoring empty, made-up ones), or
+/// `fallback` if there are none.
+fn cover(nodes: &[Node], fallback: Span) -> Span {
+    nodes
+        .iter()
+        .map(|n| n.span)
+        .filter(|s| !s.is_empty())
+        .reduce(|a, b| a.to(b))
+        .unwrap_or(fallback)
+}
+
+/// Collapse a node list into a single node. An empty list becomes empty
+/// text at `at`.
+fn finish_nodes(mut nodes: Vec<Node>, at: Span) -> Node {
     match nodes.len() {
-        0 => EqNode::Text(String::new()),
+        0 => Node::new(EqNode::Text(String::new()), at),
         1 => nodes.remove(0),
-        _ => EqNode::Seq(nodes),
+        _ => {
+            let span = cover(&nodes, at);
+            Node::new(EqNode::Seq(nodes), span)
+        }
     }
 }
 
 /// Join environment cells back into one node, keeping `&` separators as text.
-fn join_cells(mut cells: Vec<EqNode>) -> EqNode {
+fn join_cells(mut cells: Vec<Node>) -> Node {
     if cells.len() == 1 {
         return cells.remove(0);
     }
-    let mut out = Vec::new();
+    let mut out: Vec<Node> = Vec::new();
     for (i, cell) in cells.into_iter().enumerate() {
         if i > 0 {
-            out.push(EqNode::Text("&".to_string()));
+            out.push(between(out.last(), Some(&cell), "&"));
         }
         out.push(cell);
     }
-    EqNode::Seq(out)
+    let span = cover(&out, Span::default());
+    Node::new(EqNode::Seq(out), span)
+}
+
+/// Set every span in a tree to `span` (for sub-trees parsed from a
+/// rewritten string, like Unicode superscripts).
+fn respan(node: &mut Node, span: Span) {
+    node.span = span;
+    match &mut node.kind {
+        EqNode::Seq(v) | EqNode::Gather { rows: v } => v.iter_mut().for_each(|n| respan(n, span)),
+        EqNode::Sup(a, b) | EqNode::Sub(a, b) | EqNode::Frac(a, b) | EqNode::Binom(a, b) => {
+            respan(a, span);
+            respan(b, span);
+        }
+        EqNode::SupSub(a, b, c) => {
+            respan(a, span);
+            respan(b, span);
+            respan(c, span);
+        }
+        EqNode::Delimited { content, .. } | EqNode::Sqrt(content) => respan(content, span),
+        _ => {}
+    }
 }
 
 /// Convert a TeX dimension like `1em`, `-3mu`, `2.5pt` or `1cm` to the
@@ -491,7 +547,7 @@ fn parse_column_spec(spec: &str) -> Vec<ArrayColumn> {
     out
 }
 
-/// Parse a LaTeX math string into an [`EqNode`] tree.
+/// Parse a LaTeX (or plain-notation) math string into a [`Node`] tree.
 ///
 /// Accepts standard LaTeX math-mode markup as well as bareword shortcuts
 /// (`pi`, `sqrt(x)`, `int_0^1`, etc.). Never returns an error — malformed
@@ -505,7 +561,7 @@ fn parse_column_spec(spec: &str) -> Vec<ArrayColumn> {
 ///
 /// // Standard LaTeX
 /// let tree = parse_equation("\\frac{a}{b}");
-/// assert!(matches!(tree, EqNode::Frac(_, _)));
+/// assert!(matches!(tree.kind, EqNode::Frac(_, _)));
 ///
 /// // Bareword shortcuts
 /// let tree = parse_equation("pi r^2");
@@ -513,15 +569,16 @@ fn parse_column_spec(spec: &str) -> Vec<ArrayColumn> {
 /// // Complex expressions
 /// let tree = parse_equation("\\int_0^\\infty e^{-x^2} dx = \\sqrt{\\pi}");
 /// ```
-pub fn parse_equation(input: &str) -> EqNode {
+pub fn parse_equation(input: &str) -> Node {
     let mut parser = EqParser::new(input);
     let mut parts = Vec::new();
     loop {
         parts.push(parser.parse_sequence());
         // The top-level sequence has no terminators, so this only triggers
         // if a future change introduces one. Never lose input regardless.
+        let start = parser.pos;
         match parser.advance() {
-            Some(ch) => parts.push(EqNode::Text(ch.to_string())),
+            Some(ch) => parts.push(Node::new(EqNode::Text(ch.to_string()), parser.span_from(start))),
             None => break,
         }
     }
@@ -530,36 +587,60 @@ pub fn parse_equation(input: &str) -> EqNode {
     }
     let mut nodes = Vec::new();
     for part in parts {
-        match part {
+        match part.kind {
             EqNode::Seq(inner) => nodes.extend(inner),
             EqNode::Text(ref s) if s.is_empty() => {}
-            other => nodes.push(other),
+            _ => nodes.push(part),
         }
     }
-    finish_nodes(nodes)
+    finish_nodes(nodes, Span::default())
 }
 
 pub struct EqParser {
     chars: Vec<char>,
+    /// Byte offset of each char (plus one past the end), for spans.
+    offsets: Vec<usize>,
     pos: usize,
     /// Inside a `{...}` group: `}` terminates the current sequence.
     in_group: bool,
     /// Inside an environment body: `&`, `\\` and `\end` terminate the current sequence.
     in_env: bool,
+    /// Current nesting depth, capped at [`MAX_DEPTH`].
+    depth: usize,
 }
 
 impl EqParser {
     pub fn new(input: &str) -> Self {
+        let mut offsets: Vec<usize> = input.char_indices().map(|(i, _)| i).collect();
+        offsets.push(input.len());
         Self {
             chars: input.chars().collect(),
+            offsets,
             pos: 0,
             in_group: false,
             in_env: false,
+            depth: 0,
         }
     }
 
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
+    }
+
+    /// The span from char index `start` to the current position.
+    fn span_from(&self, start: usize) -> Span {
+        Span::new(self.offsets[start], self.offsets[self.pos])
+    }
+
+    /// An empty span at the current position.
+    fn here(&self) -> Span {
+        self.span_from(self.pos)
+    }
+
+    /// A node the parser makes up (not read from the input), with an empty
+    /// span at the current position.
+    fn leaf(&self, kind: EqNode) -> Node {
+        Node::new(kind, self.here())
     }
 
     fn advance(&mut self) -> Option<char> {
@@ -629,12 +710,12 @@ impl EqParser {
         true
     }
 
-    fn parse_sequence(&mut self) -> EqNode {
+    fn parse_sequence(&mut self) -> Node {
         self.parse_sequence_until_right(false)
     }
 
     /// Parse a sequence, optionally stopping at `\right` (for `\left...\right`).
-    fn parse_sequence_until_right(&mut self, stop_on_right: bool) -> EqNode {
+    fn parse_sequence_until_right(&mut self, stop_on_right: bool) -> Node {
         let mode = if stop_on_right { SeqMode::UntilRight } else { SeqMode::Normal };
         self.parse_seq(mode).remove(0)
     }
@@ -658,11 +739,11 @@ impl EqParser {
     ///
     /// Returns one node per comma-separated part in [`SeqMode::ParenArgs`]
     /// mode, and exactly one node otherwise.
-    fn parse_seq(&mut self, mode: SeqMode) -> Vec<EqNode> {
+    fn parse_seq(&mut self, mode: SeqMode) -> Vec<Node> {
         let in_parens = matches!(mode, SeqMode::Paren | SeqMode::ParenArgs);
         let stop_on_right = matches!(mode, SeqMode::UntilRight);
         let mut parts = Vec::new();
-        let mut nodes: Vec<EqNode> = Vec::new();
+        let mut nodes: Vec<Node> = Vec::new();
         // glued[i]: no whitespace between nodes[i - 1] and nodes[i].
         let mut glued: Vec<bool> = Vec::new();
         let mut after_space = false;
@@ -677,15 +758,17 @@ impl EqParser {
                     ')' if depth == 0 => break,
                     ')' | '(' => {
                         if ch == '(' { depth += 1 } else { depth -= 1 }
+                        let start = self.pos;
                         self.advance();
-                        nodes.push(EqNode::Text(ch.to_string()));
+                        nodes.push(Node::new(EqNode::Text(ch.to_string()), self.span_from(start)));
                         glued.push(!after_space);
                         after_space = false;
                         continue;
                     }
                     ',' if depth == 0 && mode == SeqMode::ParenArgs => {
+                        let at = self.here();
                         self.advance();
-                        parts.push(finish_nodes(std::mem::take(&mut nodes)));
+                        parts.push(finish_nodes(std::mem::take(&mut nodes), at));
                         glued.clear();
                         after_space = false;
                         continue;
@@ -705,17 +788,21 @@ impl EqParser {
                 after_space = true;
                 continue;
             }
-            if ch == '\\' && !in_parens {
+            if ch == '\\' && !in_parens && self.depth < MAX_DEPTH {
                 // \color{c} is a switch: it colors the rest of the current group.
                 if self.lookahead_command("color") {
+                    let start = self.pos;
                     self.pos += "\\color".len();
                     self.skip_whitespace();
                     let color = self.parse_brace_arg_opt().unwrap_or_default();
+                    self.depth += 1;
                     let rest = self.parse_seq(mode).remove(0);
-                    nodes.push(EqNode::Color {
+                    self.depth -= 1;
+                    let kind = EqNode::Color {
                         color: color.trim().to_string(),
                         content: Box::new(rest),
-                    });
+                    };
+                    nodes.push(Node::new(kind, self.span_from(start)));
                     break;
                 }
                 // Infix {a \over b} and {n \choose k}: everything before is the
@@ -728,22 +815,29 @@ impl EqParser {
                     None
                 };
                 if let Some(cmd) = infix {
+                    let at = self.here();
                     self.pos += 1 + cmd.len();
-                    let top = finish_nodes(std::mem::take(&mut nodes));
+                    let top = finish_nodes(std::mem::take(&mut nodes), at);
+                    self.depth += 1;
                     let bottom = self.parse_seq(mode).remove(0);
-                    nodes.push(if cmd == "over" {
+                    self.depth -= 1;
+                    let span = top.span.to(bottom.span).to(at);
+                    let kind = if cmd == "over" {
                         EqNode::Frac(Box::new(top), Box::new(bottom))
                     } else {
                         EqNode::Binom(Box::new(top), Box::new(bottom))
-                    });
+                    };
+                    nodes.push(Node::new(kind, span));
                     break;
                 }
             }
             if ch == '/' {
+                let slash = self.here();
                 self.advance();
-                let (numer, numer_glued) = take_numerator(&mut nodes, &mut glued);
+                let (numer, numer_glued, source) = take_numerator(&mut nodes, &mut glued, slash);
                 let denom = self.parse_denominator();
-                nodes.push(EqNode::Frac(Box::new(numer), Box::new(denom)));
+                let span = source.to(slash).to(denom.span).to(self.here());
+                nodes.push(Node::new(EqNode::Frac(Box::new(numer), Box::new(denom)), span));
                 glued.push(numer_glued && !after_space);
                 after_space = false;
                 continue;
@@ -754,7 +848,7 @@ impl EqParser {
             glued.push(!after_space);
             after_space = false;
         }
-        parts.push(finish_nodes(nodes));
+        parts.push(finish_nodes(nodes, self.here()));
         parts
     }
 
@@ -762,7 +856,7 @@ impl EqParser {
     /// dropped), or a run of adjacent letters, digits and symbols, so that
     /// `dy/dx` is `dy` over `dx`. Whitespace ends the run: `1/2 x` is
     /// one half times x.
-    fn parse_denominator(&mut self) -> EqNode {
+    fn parse_denominator(&mut self) -> Node {
         self.skip_whitespace();
         if self.peek() == Some('(') {
             let group = self.parse_group_atom();
@@ -775,7 +869,7 @@ impl EqParser {
             let node = self.parse_postfix(atom);
             parts.push(node);
         }
-        finish_nodes(parts)
+        finish_nodes(parts, self.here())
     }
 
     /// Whether the next token continues a run of adjacent operands
@@ -826,7 +920,7 @@ impl EqParser {
     /// Parse an atom that treats `(...)` as invisible grouping (no parens shown).
     /// Used by sqrt, frac, scripts and other constructs that take arguments.
     /// Inner parentheses stay visible: `((3x+3))` keeps one pair.
-    fn parse_group_atom(&mut self) -> EqNode {
+    fn parse_group_atom(&mut self) -> Node {
         self.skip_whitespace();
         if self.peek() == Some('(') {
             self.advance();
@@ -842,7 +936,7 @@ impl EqParser {
     /// Parse `( ... )` and split the contents at top-level commas, for
     /// function-style input like `root(3, x)` or `binom(n, k)`.
     /// Assumes the current char is `(`.
-    fn parse_paren_args(&mut self) -> Vec<EqNode> {
+    fn parse_paren_args(&mut self) -> Vec<Node> {
         self.advance(); // '('
         let parts = self.parse_seq(SeqMode::ParenArgs);
         if self.peek() == Some(')') {
@@ -853,7 +947,7 @@ impl EqParser {
 
     /// Parse a `{...}` group as an isolated sequence. Inside braces, `&` and
     /// `\\` are literal even when the group sits in an environment cell.
-    fn parse_brace_group(&mut self) -> EqNode {
+    fn parse_brace_group(&mut self) -> Node {
         self.advance(); // '{'
         let saved = (self.in_group, self.in_env);
         self.in_group = true;
@@ -867,7 +961,7 @@ impl EqParser {
     }
 
     /// Parse an optional `[...]` argument. Assumes the current char is `[`.
-    fn parse_bracket_arg(&mut self) -> EqNode {
+    fn parse_bracket_arg(&mut self) -> Node {
         self.advance(); // '['
         let mut nodes = Vec::new();
         while let Some(ch) = self.peek() {
@@ -883,10 +977,11 @@ impl EqParser {
                 }
             }
         }
+        let at = self.here();
         if self.peek() == Some(']') {
             self.advance();
         }
-        finish_nodes(nodes)
+        finish_nodes(nodes, at)
     }
 
     /// Parse the argument of `\sqrt` / `sqrt`, with an optional `[index]`.
@@ -895,7 +990,7 @@ impl EqParser {
         let index = if self.peek() == Some('[') { Some(self.parse_bracket_arg()) } else { None };
         let content = self.parse_group_atom();
         match index {
-            Some(EqNode::Text(ref s)) if s.trim().is_empty() => EqNode::Sqrt(Box::new(content)),
+            Some(Node { kind: EqNode::Text(ref s), .. }) if s.trim().is_empty() => EqNode::Sqrt(Box::new(content)),
             Some(index) => EqNode::Root { index: Box::new(index), content: Box::new(content) },
             None => EqNode::Sqrt(Box::new(content)),
         }
@@ -903,7 +998,8 @@ impl EqParser {
 
     /// Consume a run of Unicode superscript (or subscript) characters and
     /// parse their plain equivalents: `²³` is `23`, `₍ᵢ₊₁₎` is `(i+1)`.
-    fn take_unicode_script(&mut self, superscript: bool) -> EqNode {
+    fn take_unicode_script(&mut self, superscript: bool) -> Node {
+        let start = self.pos;
         let mut plain = String::new();
         while let Some((is_sup, p)) = self.peek().and_then(unicode_script) {
             if is_sup != superscript {
@@ -912,12 +1008,14 @@ impl EqParser {
             plain.push(p);
             self.advance();
         }
-        parse_equation(&plain)
+        let mut node = parse_equation(&plain);
+        respan(&mut node, self.span_from(start));
+        node
     }
 
     /// Parse the argument of a `^` or `_`. A parenthesized group is taken
     /// whole, with the parentheses dropped: `x^(n+1)`, `sum_(i=1)^n`.
-    fn parse_script_arg(&mut self) -> EqNode {
+    fn parse_script_arg(&mut self) -> Node {
         self.skip_whitespace_and_comments();
         if self.peek() == Some('(') {
             return self.parse_group_atom();
@@ -927,7 +1025,7 @@ impl EqParser {
 
     /// The operand of a typed `√`: a `(...)` group or a single atom with
     /// its scripts (`√x²` is the root of x²).
-    fn parse_root_operand(&mut self) -> EqNode {
+    fn parse_root_operand(&mut self) -> Node {
         let atom = self.parse_group_atom();
         self.parse_postfix(atom)
     }
@@ -984,7 +1082,8 @@ impl EqParser {
             return EqNode::TextBlock(text);
         }
         let mut args = self.parse_paren_args();
-        let delimited = |l: &str, r: &str, content: EqNode| EqNode::Delimited {
+        let at = self.here();
+        let delimited = |l: &str, r: &str, content: Node| EqNode::Delimited {
             left: l.to_string(),
             right: r.to_string(),
             content: Box::new(content),
@@ -992,27 +1091,27 @@ impl EqParser {
         match kw {
             "root" if args.len() >= 2 => {
                 let index = args.remove(0);
-                let rest = join_parts(args);
+                let rest = join_parts(args, at);
                 EqNode::Root { index: Box::new(index), content: Box::new(rest) }
             }
             "binom" if args.len() >= 2 => {
                 let top = args.remove(0);
-                let bottom = join_parts(args);
+                let bottom = join_parts(args, at);
                 EqNode::Binom(Box::new(top), Box::new(bottom))
             }
             _ => {
-                let content = join_parts(args);
+                let content = join_parts(args, at);
                 match kw {
                     "abs" => delimited("|", "|", content),
                     "norm" => delimited("\u{2016}", "\u{2016}", content),
                     "floor" => delimited("\u{230A}", "\u{230B}", content),
                     "ceil" => delimited("\u{2308}", "\u{2309}", content),
                     "cbrt" => EqNode::Root {
-                        index: Box::new(EqNode::Text("3".to_string())),
+                        index: Box::new(self.leaf(EqNode::Text("3".to_string()))),
                         content: Box::new(content),
                     },
                     "root" => EqNode::Sqrt(Box::new(content)),
-                    "binom" => EqNode::Binom(Box::new(content), Box::new(EqNode::Text(String::new()))),
+                    "binom" => EqNode::Binom(Box::new(content), Box::new(self.leaf(EqNode::Text(String::new())))),
                     _ => {
                         let kind = match kw {
                             "hat" => AccentKind::Hat,
@@ -1032,7 +1131,7 @@ impl EqParser {
 
     /// Collect `^upper` / `_lower` limits after a big operator, skipping
     /// `\limits` / `\nolimits`.
-    fn parse_big_op_limits(&mut self) -> (Option<EqNode>, Option<EqNode>) {
+    fn parse_big_op_limits(&mut self) -> (Option<Node>, Option<Node>) {
         let mut upper = None;
         let mut lower = None;
         loop {
@@ -1070,7 +1169,7 @@ impl EqParser {
     }
 
     /// Collect the `_lower` limit after a named operator like `\lim`.
-    fn parse_limit_lower(&mut self) -> Option<EqNode> {
+    fn parse_limit_lower(&mut self) -> Option<Node> {
         loop {
             if self.peek_past_whitespace() == Some('\\') {
                 let save = self.pos;
@@ -1101,14 +1200,39 @@ impl EqParser {
         }
     }
 
-    fn parse_atom(&mut self) -> EqNode {
+    /// Parse one atom (a letter, number, command, group, ...), recording
+    /// its span.
+    fn parse_atom(&mut self) -> Node {
         self.skip_whitespace_and_comments();
+        let start = self.pos;
+        if self.depth >= MAX_DEPTH {
+            // Too deep: keep the input as plain text, one character at a time.
+            let kind = match self.advance() {
+                Some(c) => EqNode::Text(c.to_string()),
+                None => EqNode::Text(String::new()),
+            };
+            return Node::new(kind, self.span_from(start));
+        }
+        self.depth += 1;
+        let node = if self.peek() == Some('{') {
+            // Braces are transparent: the group's node spans its content,
+            // so the `x` in `\sqrt{x}` spans just `x`.
+            self.parse_brace_group()
+        } else {
+            let kind = self.parse_atom_kind(start);
+            Node::new(kind, self.span_from(start))
+        };
+        self.depth -= 1;
+        node
+    }
+
+    fn parse_atom_kind(&mut self, start: usize) -> EqNode {
         match self.peek() {
             None => EqNode::Text(String::new()),
-            Some('{') => self.parse_brace_group(),
+            Some('{') => self.parse_brace_group().kind, // (handled in parse_atom)
             Some('\\') => {
                 self.advance();
-                self.parse_command()
+                self.parse_command(start)
             }
             Some(ch) if ch.is_ascii_alphabetic() => {
                 // Check for "sqrt" keyword
@@ -1127,6 +1251,7 @@ impl EqParser {
                         let op = self.big_op(kw);
                         // If followed by (...), consume as the integrand/summand body
                         if self.peek() == Some('(') {
+                            let op = Node::new(op, self.span_from(start));
                             let body = self.parse_group_atom();
                             return EqNode::Seq(vec![op, body]);
                         }
@@ -1178,15 +1303,17 @@ impl EqParser {
                 // ∛x, ∜x
                 self.advance();
                 let index = if c == '\u{221B}' { "3" } else { "4" };
-                EqNode::Root {
-                    index: Box::new(EqNode::Text(index.to_string())),
-                    content: Box::new(self.parse_root_operand()),
-                }
+                let index = Node::new(EqNode::Text(index.to_string()), self.span_from(start));
+                EqNode::Root { index: Box::new(index), content: Box::new(self.parse_root_operand()) }
             }
             Some(c) if vulgar_fraction(c).is_some() => {
                 self.advance();
                 let (n, d) = vulgar_fraction(c).unwrap();
-                EqNode::Frac(Box::new(EqNode::Text(n.to_string())), Box::new(EqNode::Text(d.to_string())))
+                let span = self.span_from(start);
+                EqNode::Frac(
+                    Box::new(Node::new(EqNode::Text(n.to_string()), span)),
+                    Box::new(Node::new(EqNode::Text(d.to_string()), span)),
+                )
             }
             Some(c) if big_op_for_char(c).is_some() => {
                 self.advance();
@@ -1201,7 +1328,8 @@ impl EqParser {
                 // Typed or pasted math letters like `ℝ` or `𝐱`.
                 self.advance();
                 let (kind, plain) = unstyle_char(ch).unwrap();
-                EqNode::MathFont { kind, content: Box::new(EqNode::Text(plain.to_string())) }
+                let content = Node::new(EqNode::Text(plain.to_string()), self.span_from(start));
+                EqNode::MathFont { kind, content: Box::new(content) }
             }
             Some(ch) => {
                 // Operators (`+ - = < >` and typed Unicode like `≤`) become
@@ -1212,12 +1340,16 @@ impl EqParser {
         }
     }
 
-    fn parse_postfix(&mut self, base: EqNode) -> EqNode {
+    fn parse_postfix(&mut self, base: Node) -> Node {
         // Collect both ^ and _ in any order to combine into SupSub if both present.
         // Primes (x', x'') become a superscript ′.
-        let mut sup: Option<EqNode> = None;
-        let mut sub: Option<EqNode> = None;
+        let mut sup: Option<Node> = None;
+        let mut sub: Option<Node> = None;
         let mut primes = 0usize;
+        let mut prime_span: Option<Span> = None;
+        let mut add_prime_span = |span: Span| {
+            prime_span = Some(prime_span.map_or(span, |s| s.to(span)));
+        };
 
         loop {
             if let Some((count, _)) = self.peek().and_then(|c| match c {
@@ -1227,7 +1359,9 @@ impl EqParser {
                 _ => None,
             }) {
                 // Typed prime characters: x′, f″
+                let at = self.pos;
                 self.advance();
+                add_prime_span(self.span_from(at));
                 primes += count;
                 continue;
             }
@@ -1242,7 +1376,9 @@ impl EqParser {
             }
             match self.peek_past_whitespace() {
                 Some('\'') if self.peek() == Some('\'') => {
+                    let at = self.pos;
                     self.advance();
+                    add_prime_span(self.span_from(at));
                     primes += 1;
                 }
                 Some('^') if sup.is_none() => {
@@ -1260,40 +1396,42 @@ impl EqParser {
         }
 
         if primes > 0 {
-            let prime = EqNode::Text("\u{2032}".repeat(primes));
+            let prime_span = prime_span.unwrap_or_else(|| self.here());
+            let prime = Node::new(EqNode::Text("\u{2032}".repeat(primes)), prime_span);
             sup = Some(match sup {
                 None => prime,
-                Some(EqNode::Seq(mut v)) => {
+                Some(Node { kind: EqNode::Seq(mut v), span }) => {
                     v.insert(0, prime);
-                    EqNode::Seq(v)
+                    Node::new(EqNode::Seq(v), span.to(prime_span))
                 }
-                Some(s) => EqNode::Seq(vec![prime, s]),
+                Some(s) => {
+                    let span = prime_span.to(s.span);
+                    Node::new(EqNode::Seq(vec![prime, s]), span)
+                }
             });
         }
 
-        match (sup, sub) {
+        let span = base.span.to(self.here());
+        let kind = match (sup, sub) {
             (Some(s), Some(b)) => EqNode::SupSub(Box::new(base), Box::new(s), Box::new(b)),
             (Some(s), None) => EqNode::Sup(Box::new(base), Box::new(s)),
             (None, Some(b)) => EqNode::Sub(Box::new(base), Box::new(b)),
-            (None, None) => base,
-        }
+            (None, None) => return base,
+        };
+        Node::new(kind, span)
     }
 
     fn try_keyword(&mut self, kw: &str) -> bool {
-        let kw_chars: Vec<char> = kw.chars().collect();
-        if self.pos + kw_chars.len() > self.chars.len() {
+        // Keywords are ASCII, so bytes and chars line up.
+        let len = kw.len();
+        let rest = &self.chars[self.pos..];
+        if rest.len() < len || !kw.bytes().zip(rest).all(|(k, &c)| k as char == c) {
             return false;
         }
-        for (i, &kc) in kw_chars.iter().enumerate() {
-            if self.chars[self.pos + i] != kc {
-                return false;
-            }
-        }
-        let after = self.pos + kw_chars.len();
-        if after < self.chars.len() && self.chars[after].is_ascii_alphabetic() {
+        if rest.get(len).is_some_and(|c| c.is_ascii_alphabetic()) {
             return false;
         }
-        self.pos += kw_chars.len();
+        self.pos += len;
         true
     }
 
@@ -1311,7 +1449,9 @@ impl EqParser {
         None
     }
 
-    fn parse_command(&mut self) -> EqNode {
+    /// Parse a command after its backslash. `start` is the position of the
+    /// backslash, for spans of nodes the command makes up.
+    fn parse_command(&mut self, start: usize) -> EqNode {
         // Handle single-char (non-alpha) commands first:
         // \, \; \: \> \! spacing, escaped characters, and a stray \\.
         if let Some(ch) = self.peek() {
@@ -1425,11 +1565,11 @@ impl EqParser {
                     "texttt" => MathFontKind::Monospace,
                     _ => MathFontKind::Italic,
                 };
-                let content = self.parse_text_block();
+                let content = self.parse_text_node();
                 return EqNode::MathFont { kind, content: Box::new(content) };
             }
             "fbox" => {
-                let content = self.parse_text_block();
+                let content = self.parse_text_node();
                 return EqNode::Enclose { kind: EncloseKind::Box, content: Box::new(content) };
             }
 
@@ -1477,7 +1617,7 @@ impl EqParser {
             }
 
             // \begin{env} ... \end{env}
-            "begin" => return self.parse_begin_env(),
+            "begin" => return self.parse_begin_env(start),
             // A stray \end{...} outside any environment: keep it as text.
             "end" => {
                 return match self.parse_brace_arg_opt() {
@@ -1544,11 +1684,13 @@ impl EqParser {
                     "xhookleftarrow" => "\u{21A9}",
                     _ => "\u{21CC}",
                 };
+                let arrow_span = self.span_from(start);
                 let below = if self.peek() == Some('[') { Some(self.parse_bracket_arg()) } else { None };
                 let above = self.parse_group_atom();
-                let mut node = symbol_node(arrow.to_string());
+                let mut node = Node::new(symbol_node(arrow.to_string()), arrow_span);
                 if let Some(below) = below {
-                    node = EqNode::StackRel { base: Box::new(node), annotation: Box::new(below), over: false };
+                    let kind = EqNode::StackRel { base: Box::new(node), annotation: Box::new(below), over: false };
+                    node = Node::new(kind, self.span_from(start));
                 }
                 return EqNode::StackRel { base: Box::new(node), annotation: Box::new(above), over: true };
             }
@@ -1588,8 +1730,9 @@ impl EqParser {
 
             // \not\in, \not=, \not\subset, ...
             "not" => {
+                let not_span = self.span_from(start);
                 let next = self.parse_atom();
-                return negate_node(next);
+                return negate_node(next, not_span);
             }
 
             // Modular arithmetic
@@ -1597,24 +1740,26 @@ impl EqParser {
                 return EqNode::Op { symbol: "mod".to_string(), kind: OpKind::Binary };
             }
             "pmod" => {
+                let cmd = |kind| Node::new(kind, Span::new(self.offsets[start], self.offsets[start]));
+                let (space, open, word, gap) = (
+                    cmd(EqNode::Space(8.0)),
+                    cmd(EqNode::Text("(".to_string())),
+                    cmd(EqNode::Limit { name: "mod".to_string(), lower: None }),
+                    cmd(EqNode::Space(6.0)),
+                );
                 let arg = self.parse_group_atom();
-                return EqNode::Seq(vec![
-                    EqNode::Space(8.0),
-                    EqNode::Text("(".to_string()),
-                    EqNode::Limit { name: "mod".to_string(), lower: None },
-                    EqNode::Space(6.0),
-                    arg,
-                    EqNode::Text(")".to_string()),
-                ]);
+                let close = self.leaf(EqNode::Text(")".to_string()));
+                return EqNode::Seq(vec![space, open, word, gap, arg, close]);
             }
             "mod" => {
+                let cmd = |kind| Node::new(kind, Span::new(self.offsets[start], self.offsets[start]));
+                let (space, word, gap) = (
+                    cmd(EqNode::Space(12.0)),
+                    cmd(EqNode::Limit { name: "mod".to_string(), lower: None }),
+                    cmd(EqNode::Space(6.0)),
+                );
                 let arg = self.parse_group_atom();
-                return EqNode::Seq(vec![
-                    EqNode::Space(12.0),
-                    EqNode::Limit { name: "mod".to_string(), lower: None },
-                    EqNode::Space(6.0),
-                    arg,
-                ]);
+                return EqNode::Seq(vec![space, word, gap, arg]);
             }
 
             // \substack{i < n \\ j < m}
@@ -1703,6 +1848,13 @@ impl EqParser {
         EqNode::TextBlock(raw.replace("\\{", "{").replace("\\}", "}"))
     }
 
+    /// [`Self::parse_text_block`] as a node with its span.
+    fn parse_text_node(&mut self) -> Node {
+        let start = self.pos;
+        let kind = self.parse_text_block();
+        Node::new(kind, self.span_from(start))
+    }
+
     /// Parse a delimiter after `\left`, `\right`, `\middle` or `\big`.
     fn parse_delimiter(&mut self) -> String {
         self.skip_whitespace();
@@ -1789,7 +1941,7 @@ impl EqParser {
     }
 
     /// Parse \begin{env_name} ... \end{env_name}.
-    fn parse_begin_env(&mut self) -> EqNode {
+    fn parse_begin_env(&mut self, start: usize) -> EqNode {
         let env_name = match self.parse_brace_arg_opt() {
             Some(name) => name.trim().to_string(),
             None => return EqNode::Text("\\begin".to_string()),
@@ -1852,7 +2004,7 @@ impl EqParser {
                 let (mut rows, _) = self.parse_env_body(false);
                 self.consume_end_env(&env_name);
                 if rows.len() == 1 {
-                    join_cells(rows.remove(0))
+                    join_cells(rows.remove(0)).kind
                 } else {
                     EqNode::Gather { rows: rows.into_iter().map(join_cells).collect() }
                 }
@@ -1860,24 +2012,29 @@ impl EqParser {
             _ => {
                 // Unknown environment — keep everything as literal text so
                 // nothing the user typed disappears.
+                let begin = Node::new(EqNode::Text(format!("\\begin{{{}}}", env_name)), self.span_from(start));
                 let (rows, hlines) = self.parse_env_body(false);
-                let mut parts = vec![EqNode::Text(format!("\\begin{{{}}}", env_name))];
+                let mut parts = vec![begin];
                 for (i, row) in rows.into_iter().enumerate() {
                     if i > 0 {
-                        parts.push(EqNode::Text("\\\\".to_string()));
+                        let sep = between(parts.last(), row.first(), "\\\\");
+                        parts.push(sep);
                     }
                     for _ in hlines.iter().filter(|&&h| h == i) {
-                        parts.push(EqNode::Text("\\hline".to_string()));
+                        let at = parts.last().map(|n| n.span.end).unwrap_or(0);
+                        parts.push(Node::new(EqNode::Text("\\hline".to_string()), Span::new(at, at)));
                     }
                     for (j, cell) in row.into_iter().enumerate() {
                         if j > 0 {
-                            parts.push(EqNode::Text("&".to_string()));
+                            parts.push(between(parts.last(), Some(&cell), "&"));
                         }
                         parts.push(cell);
                     }
                 }
+                let end_start = self.pos;
                 if self.consume_end_env(&env_name) {
-                    parts.push(EqNode::Text(format!("\\end{{{}}}", env_name)));
+                    let end = Node::new(EqNode::Text(format!("\\end{{{}}}", env_name)), self.span_from(end_start));
+                    parts.push(end);
                 }
                 EqNode::Seq(parts)
             }
@@ -1927,7 +2084,7 @@ impl EqParser {
     /// Parse an environment body: rows separated by `\\`, cells by `&`.
     /// Stops at `\end` (or at `}` if `brace_delimited`). Returns the rows and
     /// the positions of any `\hline`s.
-    fn parse_env_body(&mut self, brace_delimited: bool) -> (Vec<Vec<EqNode>>, Vec<usize>) {
+    fn parse_env_body(&mut self, brace_delimited: bool) -> (Vec<Vec<Node>>, Vec<usize>) {
         let saved = (self.in_group, self.in_env);
         // An environment opened inside a `{...}` group also ends at that
         // group's `}`, so half-typed input like `\frac{\begin{matrix} a}{b}`
@@ -1998,13 +2155,13 @@ mod tests {
 
     // ─── Helper matchers ────────────────────────────────────────────
 
-    fn is_text(node: &EqNode, expected: &str) -> bool {
-        matches!(node, EqNode::Text(s) if s == expected)
+    fn is_text(node: &Node, expected: &str) -> bool {
+        matches!(&node.kind, EqNode::Text(s) if s == expected)
     }
 
     /// Collect all Text contents from a tree (depth-first), ignoring spaces.
-    fn collect_text(node: &EqNode) -> String {
-        match node {
+    fn collect_text(node: &Node) -> String {
+        match &node.kind {
             EqNode::Text(s) => s.clone(),
             EqNode::Op { symbol, .. } | EqNode::Middle(symbol) => symbol.clone(),
             EqNode::Space(_) => String::new(),
@@ -2084,21 +2241,21 @@ mod tests {
     #[test]
     fn parse_superscript() {
         let node = parse_equation("x^2");
-        assert!(matches!(node, EqNode::Sup(_, _)));
+        assert!(matches!(node.kind, EqNode::Sup(_, _)));
         assert_eq!(collect_text(&node), "x^2");
     }
 
     #[test]
     fn parse_subscript() {
         let node = parse_equation("x_1");
-        assert!(matches!(node, EqNode::Sub(_, _)));
+        assert!(matches!(node.kind, EqNode::Sub(_, _)));
         assert_eq!(collect_text(&node), "x_1");
     }
 
     #[test]
     fn parse_combined_sup_sub() {
         let node = parse_equation("x^2_3");
-        assert!(matches!(node, EqNode::SupSub(_, _, _)));
+        assert!(matches!(node.kind, EqNode::SupSub(_, _, _)));
         assert_eq!(collect_text(&node), "x^2_3");
     }
 
@@ -2106,14 +2263,14 @@ mod tests {
     fn parse_combined_sub_sup_order() {
         // Sub then sup should also produce SupSub
         let node = parse_equation("x_3^2");
-        assert!(matches!(node, EqNode::SupSub(_, _, _)));
+        assert!(matches!(node.kind, EqNode::SupSub(_, _, _)));
     }
 
     #[test]
     fn parse_braced_superscript() {
         let node = parse_equation("x^{2n}");
-        assert!(matches!(node, EqNode::Sup(_, _)));
-        if let EqNode::Sup(_, sup) = &node {
+        assert!(matches!(node.kind, EqNode::Sup(_, _)));
+        if let EqNode::Sup(_, sup) = &node.kind {
             assert_eq!(collect_text(sup), "2n");
         }
     }
@@ -2123,14 +2280,14 @@ mod tests {
     #[test]
     fn parse_inline_fraction() {
         let node = parse_equation("a/b");
-        assert!(matches!(node, EqNode::Frac(_, _)));
+        assert!(matches!(node.kind, EqNode::Frac(_, _)));
         assert_eq!(collect_text(&node), "(a)/(b)");
     }
 
     #[test]
     fn parse_frac_command() {
         let node = parse_equation("\\frac{a}{b}");
-        assert!(matches!(node, EqNode::Frac(_, _)));
+        assert!(matches!(node.kind, EqNode::Frac(_, _)));
         assert_eq!(collect_text(&node), "(a)/(b)");
     }
 
@@ -2157,24 +2314,24 @@ mod tests {
     #[test]
     fn parse_sqrt_bareword() {
         let node = parse_equation("sqrt(x)");
-        assert!(matches!(node, EqNode::Sqrt(_)));
+        assert!(matches!(node.kind, EqNode::Sqrt(_)));
         assert_eq!(collect_text(&node), "sqrt(x)");
     }
 
     #[test]
     fn parse_sqrt_command() {
         let node = parse_equation("\\sqrt{x}");
-        assert!(matches!(node, EqNode::Sqrt(_)));
+        assert!(matches!(node.kind, EqNode::Sqrt(_)));
     }
 
     #[test]
     fn parse_sqrt_no_visible_parens() {
         // sqrt(x^2) — parens are invisible grouping, not in the AST
         let node = parse_equation("sqrt(x^2)");
-        assert!(matches!(node, EqNode::Sqrt(_)));
+        assert!(matches!(node.kind, EqNode::Sqrt(_)));
         // The inner content should be Sup(x, 2), not Seq with parens
-        if let EqNode::Sqrt(inner) = &node {
-            assert!(matches!(**inner, EqNode::Sup(_, _)), "Inner should be Sup, got: {:?}", inner);
+        if let EqNode::Sqrt(inner) = &node.kind {
+            assert!(matches!(inner.kind, EqNode::Sup(_, _)), "Inner should be Sup, got: {:?}", inner);
         }
     }
 
@@ -2219,8 +2376,8 @@ mod tests {
     #[test]
     fn parse_sum_with_limits() {
         let node = parse_equation("\\sum_{i=0}^{n}");
-        assert!(matches!(node, EqNode::BigOp { .. }));
-        if let EqNode::BigOp { lower, upper, .. } = &node {
+        assert!(matches!(node.kind, EqNode::BigOp { .. }));
+        if let EqNode::BigOp { lower, upper, .. } = &node.kind {
             assert!(lower.is_some());
             assert!(upper.is_some());
         }
@@ -2229,7 +2386,7 @@ mod tests {
     #[test]
     fn parse_int_bareword() {
         let node = parse_equation("int_0^1");
-        assert!(matches!(node, EqNode::BigOp { .. }));
+        assert!(matches!(node.kind, EqNode::BigOp { .. }));
     }
 
     #[test]
@@ -2247,8 +2404,8 @@ mod tests {
     #[test]
     fn parse_lim_bareword() {
         let node = parse_equation("lim_{x \\to 0}");
-        assert!(matches!(node, EqNode::Limit { .. }));
-        if let EqNode::Limit { name, lower } = &node {
+        assert!(matches!(node.kind, EqNode::Limit { .. }));
+        if let EqNode::Limit { name, lower } = &node.kind {
             assert_eq!(name, "lim");
             assert!(lower.is_some());
         }
@@ -2266,8 +2423,8 @@ mod tests {
     #[test]
     fn parse_log_with_subscript() {
         let node = parse_equation("log_2");
-        assert!(matches!(node, EqNode::Limit { .. }));
-        if let EqNode::Limit { name, lower } = &node {
+        assert!(matches!(node.kind, EqNode::Limit { .. }));
+        if let EqNode::Limit { name, lower } = &node.kind {
             assert_eq!(name, "log");
             assert!(lower.is_some());
         }
@@ -2275,15 +2432,23 @@ mod tests {
 
     // ─── Operator spacing ───────────────────────────────────────────
 
-    fn op(symbol: &str, kind: OpKind) -> EqNode {
-        EqNode::Op { symbol: symbol.to_string(), kind }
+    fn op(symbol: &str, kind: OpKind) -> Node {
+        EqNode::Op { symbol: symbol.to_string(), kind }.into()
+    }
+
+    fn t(text: &str) -> Node {
+        EqNode::Text(text.to_string()).into()
+    }
+
+    fn seq(nodes: Vec<Node>) -> Node {
+        EqNode::Seq(nodes).into()
     }
 
     #[test]
     fn parse_plus_is_binary_op() {
         assert_eq!(
             parse_equation("a + b"),
-            EqNode::Seq(vec![EqNode::Text("a".into()), op("+", OpKind::Binary), EqNode::Text("b".into())])
+            seq(vec![t("a"), op("+", OpKind::Binary), t("b")])
         );
     }
 
@@ -2291,16 +2456,16 @@ mod tests {
     fn parse_unary_minus_is_text() {
         assert_eq!(
             parse_equation("-x"),
-            EqNode::Seq(vec![EqNode::Text("-".into()), EqNode::Text("x".into())])
+            seq(vec![t("-"), t("x")])
         );
         // After a relation, minus is unary too.
         assert_eq!(
             parse_equation("a = -b"),
-            EqNode::Seq(vec![
-                EqNode::Text("a".into()),
+            seq(vec![
+                t("a"),
                 op("=", OpKind::Relation),
-                EqNode::Text("-".into()),
-                EqNode::Text("b".into()),
+                t("-"),
+                t("b"),
             ])
         );
     }
@@ -2309,7 +2474,7 @@ mod tests {
     fn parse_binary_minus_is_op() {
         assert_eq!(
             parse_equation("a - b"),
-            EqNode::Seq(vec![EqNode::Text("a".into()), op("-", OpKind::Binary), EqNode::Text("b".into())])
+            seq(vec![t("a"), op("-", OpKind::Binary), t("b")])
         );
     }
 
@@ -2319,14 +2484,14 @@ mod tests {
     fn parse_neq_is_relation() {
         assert_eq!(
             parse_equation("a \\neq b"),
-            EqNode::Seq(vec![EqNode::Text("a".into()), op("≠", OpKind::Relation), EqNode::Text("b".into())])
+            seq(vec![t("a"), op("≠", OpKind::Relation), t("b")])
         );
     }
 
     #[test]
     fn parse_leq_is_relation() {
         assert!(matches!(
-            parse_equation("x \\leq y"),
+            parse_equation("x \\leq y").kind,
             EqNode::Seq(v) if v[1] == op("≤", OpKind::Relation)
         ));
     }
@@ -2334,7 +2499,7 @@ mod tests {
     #[test]
     fn whitespace_produces_no_nodes() {
         assert_eq!(parse_equation("a  \n b"), parse_equation("ab"));
-        assert_eq!(parse_equation("   "), EqNode::Text(String::new()));
+        assert_eq!(parse_equation("   "), t(""));
     }
 
     // ─── Environments ───────────────────────────────────────────────
@@ -2342,8 +2507,8 @@ mod tests {
     #[test]
     fn parse_pmatrix() {
         let node = parse_equation("\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}");
-        assert!(matches!(node, EqNode::Matrix { .. }));
-        if let EqNode::Matrix { kind, rows } = &node {
+        assert!(matches!(node.kind, EqNode::Matrix { .. }));
+        if let EqNode::Matrix { kind, rows } = &node.kind {
             assert!(matches!(kind, MatrixKind::Paren));
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].len(), 2);
@@ -2353,8 +2518,8 @@ mod tests {
     #[test]
     fn parse_cases() {
         let node = parse_equation("\\begin{cases} x^2 & x > 0 \\\\ 0 & x = 0 \\end{cases}");
-        assert!(matches!(node, EqNode::Cases { .. }));
-        if let EqNode::Cases { rows } = &node {
+        assert!(matches!(node.kind, EqNode::Cases { .. }));
+        if let EqNode::Cases { rows } = &node.kind {
             assert_eq!(rows.len(), 2);
         }
     }
@@ -2364,8 +2529,8 @@ mod tests {
     #[test]
     fn parse_text_block() {
         let node = parse_equation("\\text{hello world}");
-        assert!(matches!(node, EqNode::TextBlock(_)));
-        if let EqNode::TextBlock(s) = &node {
+        assert!(matches!(node.kind, EqNode::TextBlock(_)));
+        if let EqNode::TextBlock(s) = &node.kind {
             assert_eq!(s, "hello world");
         }
     }
@@ -2373,8 +2538,8 @@ mod tests {
     #[test]
     fn parse_mathbb() {
         let node = parse_equation("\\mathbb{R}");
-        assert!(matches!(node, EqNode::MathFont { .. }));
-        if let EqNode::MathFont { kind, .. } = &node {
+        assert!(matches!(node.kind, EqNode::MathFont { .. }));
+        if let EqNode::MathFont { kind, .. } = &node.kind {
             assert!(matches!(kind, MathFontKind::Blackboard));
         }
     }
@@ -2382,25 +2547,25 @@ mod tests {
     #[test]
     fn parse_binom() {
         let node = parse_equation("\\binom{n}{k}");
-        assert!(matches!(node, EqNode::Binom(_, _)));
+        assert!(matches!(node.kind, EqNode::Binom(_, _)));
     }
 
     #[test]
     fn parse_left_right_delimiters() {
         let node = parse_equation("\\left( x \\right)");
-        assert!(matches!(node, EqNode::Delimited { .. }));
+        assert!(matches!(node.kind, EqNode::Delimited { .. }));
     }
 
     #[test]
     fn parse_overbrace() {
         let node = parse_equation("\\overbrace{a+b}^{n}");
-        assert!(matches!(node, EqNode::Brace { over: true, .. }));
+        assert!(matches!(node.kind, EqNode::Brace { over: true, .. }));
     }
 
     #[test]
     fn parse_overset() {
         let node = parse_equation("\\overset{def}{=}");
-        assert!(matches!(node, EqNode::StackRel { over: true, .. }));
+        assert!(matches!(node.kind, EqNode::StackRel { over: true, .. }));
     }
 
     // ─── Spacing commands ───────────────────────────────────────────
@@ -2408,8 +2573,8 @@ mod tests {
     #[test]
     fn parse_quad_spacing() {
         let node = parse_equation("a \\quad b");
-        if let EqNode::Seq(nodes) = &node {
-            let has_wide_space = nodes.iter().any(|n| matches!(n, EqNode::Space(w) if *w >= 18.0));
+        if let EqNode::Seq(nodes) = &node.kind {
+            let has_wide_space = nodes.iter().any(|n| matches!(n.kind, EqNode::Space(w) if w >= 18.0));
             assert!(has_wide_space, "\\quad should produce 18pt space");
         }
     }
@@ -2417,8 +2582,8 @@ mod tests {
     #[test]
     fn parse_thin_space() {
         let node = parse_equation("a\\,b");
-        if let EqNode::Seq(nodes) = &node {
-            let has_thin_space = nodes.iter().any(|n| matches!(n, EqNode::Space(w) if *w > 0.0 && *w < 5.0));
+        if let EqNode::Seq(nodes) = &node.kind {
+            let has_thin_space = nodes.iter().any(|n| matches!(n.kind, EqNode::Space(w) if w > 0.0 && w < 5.0));
             assert!(has_thin_space, "\\, should produce thin space");
         }
     }
@@ -2428,13 +2593,13 @@ mod tests {
     #[test]
     fn parse_hat_accent() {
         let node = parse_equation("\\hat{x}");
-        assert!(matches!(node, EqNode::Accent(_, AccentKind::Hat)));
+        assert!(matches!(node.kind, EqNode::Accent(_, AccentKind::Hat)));
     }
 
     #[test]
     fn parse_vec_accent() {
         let node = parse_equation("\\vec{v}");
-        assert!(matches!(node, EqNode::Accent(_, AccentKind::Vec)));
+        assert!(matches!(node.kind, EqNode::Accent(_, AccentKind::Vec)));
     }
 
     // ─── latex_to_unicode ───────────────────────────────────────────
@@ -2475,18 +2640,18 @@ mod tests {
     #[test]
     fn parse_nested_fractions() {
         let node = parse_equation("\\frac{\\frac{a}{b}}{c}");
-        assert!(matches!(node, EqNode::Frac(_, _)));
-        if let EqNode::Frac(numer, _) = &node {
-            assert!(matches!(**numer, EqNode::Frac(_, _)));
+        assert!(matches!(node.kind, EqNode::Frac(_, _)));
+        if let EqNode::Frac(numer, _) = &node.kind {
+            assert!(matches!(numer.kind, EqNode::Frac(_, _)));
         }
     }
 
     #[test]
     fn parse_nested_superscripts() {
         let node = parse_equation("x^{2^3}");
-        assert!(matches!(node, EqNode::Sup(_, _)));
-        if let EqNode::Sup(_, sup) = &node {
-            assert!(matches!(**sup, EqNode::Sup(_, _)));
+        assert!(matches!(node.kind, EqNode::Sup(_, _)));
+        if let EqNode::Sup(_, sup) = &node.kind {
+            assert!(matches!(sup.kind, EqNode::Sup(_, _)));
         }
     }
 

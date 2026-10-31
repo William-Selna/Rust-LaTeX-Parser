@@ -18,8 +18,10 @@
 //! assert_eq!(to_unicode(&tree), "x = (-b ± √(b² - 4ac))/2a");
 //! assert!(to_mathml(&tree, MathDisplay::Block).starts_with("<math"));
 //!
-//! // Or walk the tree yourself.
-//! assert!(matches!(&tree, EqNode::Seq(nodes) if matches!(nodes[2], EqNode::Frac(..))));
+//! // Or walk the tree yourself. Every node knows where it came from.
+//! let EqNode::Seq(parts) = &tree.kind else { unreachable!() };
+//! assert!(matches!(parts[2].kind, EqNode::Frac(..)));
+//! assert_eq!(parts[2].span.range(), 4..33); // "(-b +/- sqrt(b^2 - 4ac))/(2a)"
 //! ```
 //!
 //! # Plain notation
@@ -88,7 +90,8 @@ pub mod parser;
 mod symbols;
 
 pub use ast::{
-    AccentKind, ArrayColumn, EncloseKind, EqMetrics, EqNode, MathFontKind, MatrixKind, OpKind,
+    AccentKind, ArrayColumn, EncloseKind, EqMetrics, EqNode, MathFontKind, MatrixKind, Node,
+    OpKind, Span,
 };
 pub use output::{to_latex, to_mathml, to_unicode, MathDisplay};
 pub use parser::parse_equation;

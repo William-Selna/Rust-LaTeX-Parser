@@ -21,7 +21,7 @@ use crate::ast::*;
 /// let tree = parse_equation(r"\frac{-b \pm \sqrt{b^2 - 4ac}}{2a}");
 /// assert_eq!(to_unicode(&tree), "(-b ± √(b² - 4ac))/2a");
 /// ```
-pub fn to_unicode(node: &EqNode) -> String {
+pub fn to_unicode(node: &Node) -> String {
     let mut w = Writer::default();
     w.node(node);
     collapse_spaces(&w.out)
@@ -42,7 +42,7 @@ fn collapse_spaces(s: &str) -> String {
 }
 
 /// A sub-tree as text, using the same font context.
-fn render(node: &EqNode, font: Option<MathFontKind>) -> String {
+fn render(node: &Node, font: Option<MathFontKind>) -> String {
     let mut w = Writer { out: String::new(), font };
     w.node(node);
     collapse_spaces(&w.out)
@@ -51,8 +51,8 @@ fn render(node: &EqNode, font: Option<MathFontKind>) -> String {
 /// Whether a rendered fragment reads as one unit without parentheses.
 /// Matches how the parser reads `/`: a run with no spaces is one operand
 /// (`2a`, `sin(x)`), and so is anything that brings its own brackets.
-fn is_atomic(node: &EqNode, text: &str) -> bool {
-    match node {
+fn is_atomic(node: &Node, text: &str) -> bool {
+    match &node.kind {
         EqNode::Sqrt(_) | EqNode::Root { .. } | EqNode::Delimited { .. } => true,
         EqNode::Frac(..) | EqNode::Op { .. } => false,
         _ => !text.contains(' ') && !text.contains('/'),
@@ -60,7 +60,7 @@ fn is_atomic(node: &EqNode, text: &str) -> bool {
 }
 
 /// `(text)` unless it is already a single unit.
-fn paren_if_needed(node: &EqNode, text: String) -> String {
+fn paren_if_needed(node: &Node, text: String) -> String {
     if is_atomic(node, &text) {
         text
     } else {
@@ -89,7 +89,7 @@ fn subscript_char(c: char) -> Option<char> {
 }
 
 /// A script as Unicode script characters if possible, else `^(...)`.
-fn script(node: &EqNode, font: Option<MathFontKind>, sup: bool) -> String {
+fn script(node: &Node, font: Option<MathFontKind>, sup: bool) -> String {
     let text = render(node, font);
     let compact: String = text.chars().filter(|c| *c != ' ').collect();
     let map = if sup { superscript_char } else { subscript_char };
@@ -108,9 +108,9 @@ fn script(node: &EqNode, font: Option<MathFontKind>, sup: bool) -> String {
 }
 
 impl Writer {
-    fn node(&mut self, node: &EqNode) {
+    fn node(&mut self, node: &Node) {
         let font = self.font;
-        match node {
+        match &node.kind {
             EqNode::Text(t) => match font {
                 Some(kind) => self.out.push_str(&styled_str(kind, t)),
                 None => self.out.push_str(t),
@@ -127,14 +127,14 @@ impl Writer {
             }
             EqNode::Seq(nodes) => {
                 for (i, n) in nodes.iter().enumerate() {
-                    let is_word = matches!(n, EqNode::Limit { .. } | EqNode::BigOp { .. });
+                    let is_word = matches!(&n.kind, EqNode::Limit { .. } | EqNode::BigOp { .. });
                     let after_open = self.out.ends_with([' ', '(']);
                     if is_word && i > 0 && !after_open {
                         self.out.push(' ');
                     }
                     self.node(n);
-                    let is_operator_word = matches!(n, EqNode::Limit { .. } | EqNode::BigOp { .. });
-                    let next_is_paren = matches!(nodes.get(i + 1), Some(EqNode::Text(t)) if t == "(");
+                    let is_operator_word = matches!(&n.kind, EqNode::Limit { .. } | EqNode::BigOp { .. });
+                    let next_is_paren = matches!(nodes.get(i + 1).map(|n| &n.kind), Some(EqNode::Text(t)) if t == "(");
                     if is_operator_word && !next_is_paren {
                         self.out.push(' ');
                     }
@@ -263,7 +263,7 @@ impl Writer {
                 }
             }
             EqNode::StackRel { base, annotation, over } => {
-                let is_op = matches!(base.as_ref(), EqNode::Op { .. });
+                let is_op = matches!(&base.kind, EqNode::Op { .. });
                 let base_text = render(base, font);
                 if is_op {
                     self.out.push(' ');
@@ -292,13 +292,13 @@ impl Writer {
         }
     }
 
-    fn base(&mut self, base: &EqNode) {
+    fn base(&mut self, base: &Node) {
         let text = render(base, self.font);
         self.out.push_str(&paren_if_needed(base, text));
     }
 }
 
-fn rows_text(rows: &[Vec<EqNode>], font: Option<MathFontKind>, cell_sep: &str, row_sep: &str) -> String {
+fn rows_text(rows: &[Vec<Node>], font: Option<MathFontKind>, cell_sep: &str, row_sep: &str) -> String {
     rows.iter()
         .map(|r| r.iter().map(|c| render(c, font)).collect::<Vec<_>>().join(cell_sep))
         .collect::<Vec<_>>()

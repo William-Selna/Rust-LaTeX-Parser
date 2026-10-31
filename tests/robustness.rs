@@ -53,13 +53,13 @@ fn unmatched_parens() {
 #[test]
 fn empty_frac() {
     let node = parse_equation("\\frac{}{}");
-    assert!(matches!(node, EqNode::Frac(_, _)));
+    assert!(matches!(node.kind, EqNode::Frac(_, _)));
 }
 
 #[test]
 fn empty_sqrt() {
     let node = parse_equation("\\sqrt{}");
-    assert!(matches!(node, EqNode::Sqrt(_)));
+    assert!(matches!(node.kind, EqNode::Sqrt(_)));
 }
 
 #[test]
@@ -122,19 +122,19 @@ fn repeated_superscripts() {
 #[test]
 fn empty_matrix() {
     let node = parse_equation("\\begin{pmatrix}\\end{pmatrix}");
-    assert!(matches!(node, EqNode::Matrix { .. }));
+    assert!(matches!(node.kind, EqNode::Matrix { .. }));
 }
 
 #[test]
 fn matrix_single_cell() {
     let node = parse_equation("\\begin{bmatrix} 42 \\end{bmatrix}");
-    assert!(matches!(node, EqNode::Matrix { .. }));
+    assert!(matches!(node.kind, EqNode::Matrix { .. }));
 }
 
 #[test]
 fn cases_single_row() {
     let node = parse_equation("\\begin{cases} x \\end{cases}");
-    assert!(matches!(node, EqNode::Cases { .. }));
+    assert!(matches!(node.kind, EqNode::Cases { .. }));
 }
 
 #[test]
@@ -155,7 +155,7 @@ fn nested_environments() {
     let node = parse_equation(
         "\\begin{pmatrix} \\begin{cases} a & b \\\\ c & d \\end{cases} & e \\\\ f & g \\end{pmatrix}"
     );
-    assert!(matches!(node, EqNode::Matrix { .. }));
+    assert!(matches!(node.kind, EqNode::Matrix { .. }));
 }
 
 // ─── Real-world expressions ─────────────────────────────────────────
@@ -163,7 +163,7 @@ fn nested_environments() {
 #[test]
 fn quadratic_formula() {
     let node = parse_equation("x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}");
-    assert!(matches!(node, EqNode::Seq(_)));
+    assert!(matches!(node.kind, EqNode::Seq(_)));
 }
 
 #[test]

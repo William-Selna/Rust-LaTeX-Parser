@@ -2,7 +2,7 @@
 
 mod common;
 
-use rust_latex_parser::{parse_equation, to_latex, to_mathml, to_unicode, EqNode, MathDisplay};
+use rust_latex_parser::{parse_equation, to_latex, to_mathml, to_unicode, EqNode, MathDisplay, Node};
 
 /// Valid expressions covering every node type.
 const CORPUS: &[&str] = &[
@@ -42,21 +42,23 @@ const CORPUS: &[&str] = &[
 
 /// Recursively flatten nested sequences so trees that differ only in
 /// grouping compare equal (`{a b} c` vs `a b c` print the same).
-fn normalize(node: &EqNode) -> EqNode {
-    fn flat(node: &EqNode, out: &mut Vec<EqNode>) {
-        match node {
+fn normalize(node: &Node) -> Node {
+    fn flat(node: &Node, out: &mut Vec<Node>) {
+        match &node.kind {
             EqNode::Seq(v) => v.iter().for_each(|n| flat(n, out)),
-            other => out.push(normalize_inner(other)),
+            _ => out.push(normalize_inner(node)),
         }
     }
     let mut out = Vec::new();
     flat(node, &mut out);
-    if out.len() == 1 { out.remove(0) } else { EqNode::Seq(out) }
+    if out.len() == 1 { out.remove(0) } else { EqNode::Seq(out).into() }
 }
 
-fn normalize_inner(node: &EqNode) -> EqNode {
-    let b = |n: &EqNode| Box::new(normalize(n));
-    match node {
+fn normalize_inner(node: &Node) -> Node {
+    let b = |n: &Node| Box::new(normalize(n));
+    let ob = |n: &Option<Box<Node>>| n.as_ref().map(|n| b(n));
+    let rows = |r: &Vec<Vec<Node>>| r.iter().map(|row| row.iter().map(normalize).collect()).collect();
+    let kind = match &node.kind {
         EqNode::Sup(x, y) => EqNode::Sup(b(x), b(y)),
         EqNode::Sub(x, y) => EqNode::Sub(b(x), b(y)),
         EqNode::SupSub(x, y, z) => EqNode::SupSub(b(x), b(y), b(z)),
@@ -70,16 +72,17 @@ fn normalize_inner(node: &EqNode) -> EqNode {
         EqNode::Color { color, content } => EqNode::Color { color: color.clone(), content: b(content) },
         EqNode::Enclose { kind, content } => EqNode::Enclose { kind: *kind, content: b(content) },
         EqNode::StackRel { base, annotation, over } => EqNode::StackRel { base: b(base), annotation: b(annotation), over: *over },
-        EqNode::Brace { content, label, over } => EqNode::Brace { content: b(content), label: label.as_ref().map(|l| b(l)), over: *over },
-        EqNode::BigOp { symbol, lower, upper } => EqNode::BigOp { symbol: symbol.clone(), lower: lower.as_ref().map(|l| b(l)), upper: upper.as_ref().map(|u| b(u)) },
-        EqNode::Limit { name, lower } => EqNode::Limit { name: name.clone(), lower: lower.as_ref().map(|l| b(l)) },
-        EqNode::Matrix { kind, rows } => EqNode::Matrix { kind: *kind, rows: rows.iter().map(|r| r.iter().map(normalize).collect()).collect() },
-        EqNode::Align { rows } => EqNode::Align { rows: rows.iter().map(|r| r.iter().map(normalize).collect()).collect() },
-        EqNode::Array { columns, rows, hlines } => EqNode::Array { columns: columns.clone(), rows: rows.iter().map(|r| r.iter().map(normalize).collect()).collect(), hlines: hlines.clone() },
-        EqNode::Gather { rows } => EqNode::Gather { rows: rows.iter().map(normalize).collect() },
-        EqNode::Cases { rows } => EqNode::Cases { rows: rows.iter().map(|(v, c)| (normalize(v), c.as_ref().map(normalize))).collect() },
+        EqNode::Brace { content, label, over } => EqNode::Brace { content: b(content), label: ob(label), over: *over },
+        EqNode::BigOp { symbol, lower, upper } => EqNode::BigOp { symbol: symbol.clone(), lower: ob(lower), upper: ob(upper) },
+        EqNode::Limit { name, lower } => EqNode::Limit { name: name.clone(), lower: ob(lower) },
+        EqNode::Matrix { kind, rows: r } => EqNode::Matrix { kind: *kind, rows: rows(r) },
+        EqNode::Align { rows: r } => EqNode::Align { rows: rows(r) },
+        EqNode::Array { columns, rows: r, hlines } => EqNode::Array { columns: columns.clone(), rows: rows(r), hlines: hlines.clone() },
+        EqNode::Gather { rows: r } => EqNode::Gather { rows: r.iter().map(normalize).collect() },
+        EqNode::Cases { rows: r } => EqNode::Cases { rows: r.iter().map(|(v, c)| (normalize(v), c.as_ref().map(normalize))).collect() },
         other => other.clone(),
-    }
+    };
+    Node::new(kind, node.span)
 }
 
 // ─── LaTeX ──────────────────────────────────────────────────────────

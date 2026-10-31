@@ -1,38 +1,203 @@
-//! AST types for the equation layout tree.
+//! AST types for the equation tree.
 //!
-//! The core type is [`EqNode`] — a recursive enum representing every structural
-//! element the parser can produce. You'll pattern-match on it to build your
-//! renderer, converter, or whatever else you need.
+//! The parser returns a [`Node`]: what the node *is* ([`EqNode`], a recursive
+//! enum you pattern-match on) and where it came from in the input
+//! ([`Span`]). Children are `Node`s too, so every part of the tree knows its
+//! source position — an editor can map the cursor to the tree, highlight the
+//! part being edited, or underline an unknown command.
 //!
 //! [`EqMetrics`] is a simple struct for stashing width/ascent/descent
-//! measurements if you're building a layout engine. It's not used by the
-//! parser itself — it's here for your convenience.
+//! measurements if you're building a layout engine.
 
-/// A node in the equation layout tree.
+use std::ops::Range;
+
+/// A range of the input string, as byte offsets: `&input[span.range()]` is
+/// the source text of a node.
 ///
-/// Returned by [`crate::parse_equation`]. Every variant is recursive, so a
-/// fraction's numerator can contain another fraction, a matrix cell can hold
-/// a summation, and so on — there's no depth limit.
+/// Nodes the parser makes up rather than reads (the `3` of a typed `∛`, or
+/// the empty text of a missing `\frac` argument) have an empty span at the
+/// position where they would be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Span {
+    /// Byte offset of the first character.
+    pub start: usize,
+    /// Byte offset just past the last character.
+    pub end: usize,
+}
+
+impl Span {
+    /// A span from `start` to `end` (byte offsets).
+    pub fn new(start: usize, end: usize) -> Self {
+        Span { start, end }
+    }
+
+    /// The span as a `Range`, for slicing the input.
+    pub fn range(&self) -> Range<usize> {
+        self.start..self.end
+    }
+
+    /// Length in bytes.
+    pub fn len(&self) -> usize {
+        self.end - self.start
+    }
+
+    /// Whether the span covers no input.
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
+    /// Whether the byte offset `offset` falls inside the span. A cursor at
+    /// the very end counts as inside.
+    pub fn contains(&self, offset: usize) -> bool {
+        self.start <= offset && offset <= self.end
+    }
+
+    /// The smallest span covering both.
+    pub fn to(&self, other: Span) -> Span {
+        Span::new(self.start.min(other.start), self.end.max(other.end))
+    }
+}
+
+/// A node in the equation tree: what it is, and where it came from.
+///
+/// Returned by [`crate::parse_equation`]. Match on [`Node::kind`] to see what
+/// the node is; its children are `Node`s too.
+///
+/// Comparing nodes with `==` compares their structure and ignores spans, so
+/// trees parsed from `a+b` and `a + b` are equal.
 ///
 /// # Walking the tree
 ///
 /// ```
-/// use rust_latex_parser::{parse_equation, EqNode};
+/// use rust_latex_parser::{parse_equation, EqNode, Node};
 ///
-/// fn count_fractions(node: &EqNode) -> usize {
-///     match node {
-///         EqNode::Frac(n, d) => 1 + count_fractions(n) + count_fractions(d),
-///         EqNode::Seq(nodes) => nodes.iter().map(count_fractions).sum(),
-///         EqNode::Sup(base, sup) => count_fractions(base) + count_fractions(sup),
-///         EqNode::Sub(base, sub) => count_fractions(base) + count_fractions(sub),
-///         EqNode::Sqrt(inner) => count_fractions(inner),
-///         _ => 0,
-///     }
+/// fn count_fractions(node: &Node) -> usize {
+///     let here = matches!(node.kind, EqNode::Frac(..)) as usize;
+///     here + node.children().into_iter().map(count_fractions).sum::<usize>()
 /// }
 ///
-/// let tree = parse_equation("\\frac{\\frac{a}{b}}{c}");
+/// let input = "\\frac{\\frac{a}{b}}{c}";
+/// let tree = parse_equation(input);
 /// assert_eq!(count_fractions(&tree), 2);
+///
+/// // Every node knows where it came from.
+/// let numerator = &tree.children()[0];
+/// assert_eq!(&input[numerator.span.range()], "\\frac{a}{b}");
 /// ```
+#[derive(Debug, Clone)]
+pub struct Node {
+    /// What the node is.
+    pub kind: EqNode,
+    /// Where it came from in the input.
+    pub span: Span,
+}
+
+impl PartialEq for Node {
+    /// Structural equality: spans are ignored.
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+impl From<EqNode> for Node {
+    /// A node with an empty span, for building trees by hand.
+    fn from(kind: EqNode) -> Self {
+        Node { kind, span: Span::default() }
+    }
+}
+
+impl Node {
+    /// A node of the given kind covering `span`.
+    pub fn new(kind: EqNode, span: Span) -> Self {
+        Node { kind, span }
+    }
+
+    /// The direct children, in reading order: a fraction's numerator then
+    /// denominator, a script's base then its scripts, a matrix's cells row
+    /// by row, and so on.
+    pub fn children(&self) -> Vec<&Node> {
+        let mut out: Vec<&Node> = Vec::new();
+        match &self.kind {
+            EqNode::Text(_) | EqNode::Op { .. } | EqNode::Space(_) | EqNode::TextBlock(_)
+            | EqNode::Middle(_) | EqNode::SizedDelim { .. } => {}
+            EqNode::Seq(v) | EqNode::Gather { rows: v } => out.extend(v),
+            EqNode::Sup(a, b) | EqNode::Sub(a, b) | EqNode::Frac(a, b) | EqNode::Binom(a, b) => {
+                out.push(a);
+                out.push(b);
+            }
+            EqNode::SupSub(base, sup, sub) => {
+                out.push(base);
+                out.push(sub);
+                out.push(sup);
+            }
+            EqNode::Sqrt(c)
+            | EqNode::Accent(c, _)
+            | EqNode::MathFont { content: c, .. }
+            | EqNode::Delimited { content: c, .. }
+            | EqNode::Color { content: c, .. }
+            | EqNode::Enclose { content: c, .. } => out.push(c),
+            EqNode::Root { index, content } => {
+                out.push(index);
+                out.push(content);
+            }
+            EqNode::BigOp { lower, upper, .. } => {
+                out.extend(lower.as_deref());
+                out.extend(upper.as_deref());
+            }
+            EqNode::Limit { lower, .. } => out.extend(lower.as_deref()),
+            EqNode::Matrix { rows, .. } | EqNode::Align { rows } | EqNode::Array { rows, .. } => {
+                out.extend(rows.iter().flatten())
+            }
+            EqNode::Cases { rows } => {
+                for (value, condition) in rows {
+                    out.push(value);
+                    out.extend(condition);
+                }
+            }
+            EqNode::Brace { content, label, .. } => {
+                out.push(content);
+                out.extend(label.as_deref());
+            }
+            EqNode::StackRel { base, annotation, .. } => {
+                out.push(annotation);
+                out.push(base);
+            }
+        }
+        out
+    }
+
+    /// The innermost node whose span contains the byte offset `offset`, for
+    /// mapping a cursor or click position to the tree. Nodes with empty
+    /// spans (made up by the parser) are skipped.
+    ///
+    /// ```
+    /// use rust_latex_parser::{parse_equation, EqNode};
+    ///
+    /// let input = "a + \\sqrt{x}";
+    /// let tree = parse_equation(input);
+    /// let at = tree.node_at(10).unwrap(); // the `x`
+    /// assert_eq!(at.kind, EqNode::Text("x".into()));
+    /// ```
+    pub fn node_at(&self, offset: usize) -> Option<&Node> {
+        if !self.span.contains(offset) {
+            return None;
+        }
+        for child in self.children() {
+            if !child.span.is_empty() {
+                if let Some(found) = child.node_at(offset) {
+                    return Some(found);
+                }
+            }
+        }
+        Some(self)
+    }
+}
+
+/// What a [`Node`] is.
+///
+/// Every variant is recursive, so a fraction's numerator can contain another
+/// fraction, a matrix cell can hold a summation, and so on — there's no
+/// depth limit. Children are [`Node`]s, which also carry their source spans.
 ///
 /// The enum is `#[non_exhaustive]`: new LaTeX constructs may add variants in
 /// future releases, so include a wildcard arm when matching.
@@ -65,41 +230,41 @@ pub enum EqNode {
 
     /// A horizontal sequence of nodes. This is the most common container —
     /// any expression with more than one piece gets wrapped in a `Seq`.
-    Seq(Vec<EqNode>),
+    Seq(Vec<Node>),
 
     /// Base with superscript. Produced by `x^2` or `x^{2n}`.
     ///
     /// Fields: `(base, superscript)`.
-    Sup(Box<EqNode>, Box<EqNode>),
+    Sup(Box<Node>, Box<Node>),
 
     /// Base with subscript. Produced by `x_1` or `x_{i+1}`.
     ///
     /// Fields: `(base, subscript)`.
-    Sub(Box<EqNode>, Box<EqNode>),
+    Sub(Box<Node>, Box<Node>),
 
     /// Base with both superscript and subscript, stacked vertically to the
     /// right of the base. Produced by `x^2_3` or `x_3^2` (order doesn't matter).
     ///
     /// Fields: `(base, superscript, subscript)`.
-    SupSub(Box<EqNode>, Box<EqNode>, Box<EqNode>),
+    SupSub(Box<Node>, Box<Node>, Box<Node>),
 
     /// Fraction with numerator over denominator.
     ///
     /// Produced by `\frac{a}{b}` or the shorthand `a/b`.
     ///
     /// Fields: `(numerator, denominator)`.
-    Frac(Box<EqNode>, Box<EqNode>),
+    Frac(Box<Node>, Box<Node>),
 
     /// Square root wrapping its contents.
     ///
     /// Produced by `\sqrt{x}` or the bareword `sqrt(x)`.
-    Sqrt(Box<EqNode>),
+    Sqrt(Box<Node>),
 
     /// Root with an explicit index, e.g. a cube root.
     ///
     /// Produced by `\sqrt[3]{x}` or the bareword `sqrt[3](x)`. An empty
     /// index (`\sqrt[]{x}`) produces a plain [`EqNode::Sqrt`] instead.
-    Root { index: Box<EqNode>, content: Box<EqNode> },
+    Root { index: Box<Node>, content: Box<Node> },
 
     /// Big operator — summation, integral, product, etc. — with optional
     /// upper and lower limits.
@@ -108,15 +273,15 @@ pub enum EqNode {
     /// Produced by `\sum_{i=0}^{n}` or the bareword `sum_{i=0}^{n}`.
     BigOp {
         symbol: String,
-        lower: Option<Box<EqNode>>,
-        upper: Option<Box<EqNode>>,
+        lower: Option<Box<Node>>,
+        upper: Option<Box<Node>>,
     },
 
     /// An accent mark above (or, for [`AccentKind::Underline`], below) a node.
     ///
     /// Produced by `\hat{x}`, `\bar{x}`, `\vec{v}`, `\widehat{xy}`,
     /// `\underline{x}`, and friends. See [`AccentKind`] for the variants.
-    Accent(Box<EqNode>, AccentKind),
+    Accent(Box<Node>, AccentKind),
 
     /// A named limit-style operator (`lim`, `sin`, `log`, etc.) with an
     /// optional subscript limit.
@@ -126,7 +291,7 @@ pub enum EqNode {
     /// and custom operators via `\operatorname{rank}`.
     Limit {
         name: String,
-        lower: Option<Box<EqNode>>,
+        lower: Option<Box<Node>>,
     },
 
     /// Upright text block within an equation.
@@ -141,7 +306,7 @@ pub enum EqNode {
     /// etc. Styled text commands like `\textbf{...}` produce a `MathFont`
     /// wrapping a [`EqNode::TextBlock`]. See [`MathFontKind`] for the font
     /// families.
-    MathFont { kind: MathFontKind, content: Box<EqNode> },
+    MathFont { kind: MathFontKind, content: Box<Node> },
 
     /// Content wrapped in stretchy delimiters.
     ///
@@ -150,7 +315,7 @@ pub enum EqNode {
     /// converted to Unicode: `\left\{` gives `"{"`, `\left\langle` gives `"⟨"`,
     /// `\left\|` gives `"‖"`. An invisible delimiter (`\left.` or `\right.`)
     /// produces an empty string.
-    Delimited { left: String, right: String, content: Box<EqNode> },
+    Delimited { left: String, right: String, content: Box<Node> },
 
     /// A delimiter between `\left` and `\right` that stretches to the same
     /// height, as in set-builder notation `\left\{ x \middle| x > 0 \right\}`.
@@ -170,15 +335,15 @@ pub enum EqNode {
     /// Matrix or matrix-like environment.
     ///
     /// Produced by `\begin{pmatrix}`, `\begin{bmatrix}`, `\begin{smallmatrix}`, etc.
-    /// Each inner `Vec<EqNode>` is one row, each `EqNode` in a row is one cell.
+    /// Each inner `Vec<Node>` is one row, each `Node` in a row is one cell.
     /// See [`MatrixKind`] for the delimiter styles.
-    Matrix { kind: MatrixKind, rows: Vec<Vec<EqNode>> },
+    Matrix { kind: MatrixKind, rows: Vec<Vec<Node>> },
 
     /// Piecewise / cases environment.
     ///
     /// Produced by `\begin{cases} ... \end{cases}` (or `dcases`). Each row
     /// is a `(value, optional_condition)` pair. The condition comes after `&`.
-    Cases { rows: Vec<(EqNode, Option<EqNode>)> },
+    Cases { rows: Vec<(Node, Option<Node>)> },
 
     /// Multi-line equations aligned at `&` markers.
     ///
@@ -186,13 +351,13 @@ pub enum EqNode {
     /// `alignedat`, `flalign` and `eqnarray`. Each row is split into cells
     /// at `&`. Following amsmath, odd-numbered columns (1st, 3rd, ...) are
     /// right-aligned and even-numbered columns are left-aligned.
-    Align { rows: Vec<Vec<EqNode>> },
+    Align { rows: Vec<Vec<Node>> },
 
     /// Multi-line equations, each line centered.
     ///
     /// Produced by `gather`, `gather*` and `gathered`, and by `equation`
     /// when its body contains `\\`.
-    Gather { rows: Vec<EqNode> },
+    Gather { rows: Vec<Node> },
 
     /// A general array with per-column alignment.
     ///
@@ -202,20 +367,20 @@ pub enum EqNode {
     /// (and `rows.len()` means below the last row).
     Array {
         columns: Vec<ArrayColumn>,
-        rows: Vec<Vec<EqNode>>,
+        rows: Vec<Vec<Node>>,
         hlines: Vec<usize>,
     },
 
     /// Binomial coefficient. Rendered as a stacked pair in parentheses.
     ///
     /// Produced by `\binom{n}{k}`. Fields: `(top, bottom)`.
-    Binom(Box<EqNode>, Box<EqNode>),
+    Binom(Box<Node>, Box<Node>),
 
     /// Overbrace or underbrace with an optional label.
     ///
     /// Produced by `\overbrace{a+b}^{n}` (over=true) or
     /// `\underbrace{x+y}_{text}` (over=false).
-    Brace { content: Box<EqNode>, label: Option<Box<EqNode>>, over: bool },
+    Brace { content: Box<Node>, label: Option<Box<Node>>, over: bool },
 
     /// One expression stacked above or below another.
     ///
@@ -226,7 +391,7 @@ pub enum EqNode {
     /// is spaced like a relation. Extensible arrows like
     /// `\xrightarrow[below]{above}` are built from nested `StackRel` nodes
     /// around an [`EqNode::Op`] arrow.
-    StackRel { base: Box<EqNode>, annotation: Box<EqNode>, over: bool },
+    StackRel { base: Box<Node>, annotation: Box<Node>, over: bool },
 
     /// Colored subexpression.
     ///
@@ -234,13 +399,13 @@ pub enum EqNode {
     /// `\color{red}` (a switch that colors everything after it in the
     /// current group, like in LaTeX). `color` is the raw color spec, e.g.
     /// `"red"` or `"#ff0000"`.
-    Color { color: String, content: Box<EqNode> },
+    Color { color: String, content: Box<Node> },
 
     /// Content with a box or strike-through drawn over it.
     ///
     /// Produced by `\boxed{x}`, `\fbox{text}`, `\cancel{x}`, `\bcancel{x}`
     /// and `\xcancel{x}`. See [`EncloseKind`].
-    Enclose { kind: EncloseKind, content: Box<EqNode> },
+    Enclose { kind: EncloseKind, content: Box<Node> },
 }
 
 /// The spacing class of an [`EqNode::Op`].
