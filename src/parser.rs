@@ -22,9 +22,8 @@
 //! `\limits`, `\nonumber`, `\label{...}`, ...).
 
 use crate::ast::*;
-
-/// Space (in points) inserted on each side of binary operators like `+`, `=`, `\leq`.
-const OP_SPACE: f32 = 4.0;
+pub use crate::symbols::latex_to_unicode;
+use crate::symbols::op_kind;
 
 /// Width of `\quad` (1em). Other units are scaled relative to this.
 const EM: f32 = 18.0;
@@ -56,42 +55,32 @@ const LIMIT_OPS: &[&str] = &[
     "det", "dim", "ker", "deg", "gcd", "hom", "arg", "Pr",
 ];
 
-/// Characters that are relation or binary operators and should get OP_SPACE on each side.
-fn is_spaced_operator(ch: char) -> bool {
-    matches!(ch,
-        '\u{2264}' | '\u{2265}' | '\u{2260}' | '\u{2248}' | '\u{2261}' | // ≤ ≥ ≠ ≈ ≡
-        '\u{2208}' | '\u{2282}' | '\u{2283}' | '\u{2286}' | '\u{2287}' | // ∈ ⊂ ⊃ ⊆ ⊇
-        '\u{2192}' | '\u{2190}' | '\u{2194}' | '\u{21D2}' | '\u{21D0}' | '\u{21D4}' | // → ← ↔ ⇒ ⇐ ⇔
-        '\u{227A}' | '\u{227B}' | '\u{223C}' | '\u{2245}' | '\u{226A}' | '\u{226B}' | // ≺ ≻ ∼ ≅ ≪ ≫
-        '\u{221D}' | // ∝
-        '\u{00B1}' | '\u{2213}' | '\u{00D7}' | '\u{00F7}' | // ± ∓ × ÷
-        // Negated and additional relations
-        '\u{2209}' | '\u{220B}' | '\u{220C}' | '\u{2223}' | '\u{2224}' | '\u{2225}' | '\u{2226}' | // ∉ ∋ ∌ ∣ ∤ ∥ ∦
-        '\u{2270}' | '\u{2271}' | '\u{2A7D}' | '\u{2A7E}' | '\u{226E}' | '\u{226F}' | // ≰ ≱ ⩽ ⩾ ≮ ≯
-        '\u{228A}' | '\u{228B}' | '\u{2284}' | '\u{2285}' | '\u{2288}' | '\u{2289}' | // ⊊ ⊋ ⊄ ⊅ ⊈ ⊉
-        '\u{2262}' | '\u{2249}' | '\u{2247}' | '\u{2241}' | '\u{2243}' | '\u{2244}' | // ≢ ≉ ≇ ≁ ≃ ≄
-        '\u{2280}' | '\u{2281}' | '\u{2291}' | '\u{2292}' | '\u{2272}' | '\u{2273}' | // ⊀ ⊁ ⊑ ⊒ ≲ ≳
-        '\u{2254}' | '\u{2250}' | '\u{224D}' | '\u{22A2}' | '\u{22A3}' | '\u{22A8}' | // ≔ ≐ ≍ ⊢ ⊣ ⊨
-        // Additional arrows
-        '\u{27F5}' | '\u{27F6}' | '\u{27F7}' | '\u{27F8}' | '\u{27F9}' | '\u{27FA}' | // ⟵ ⟶ ⟷ ⟸ ⟹ ⟺
-        '\u{21A6}' | '\u{27FC}' | '\u{21AA}' | '\u{21A9}' | '\u{21CC}' | // ↦ ⟼ ↪ ↩ ⇌
-        '\u{219A}' | '\u{219B}' | '\u{21AE}' | '\u{21CD}' | '\u{21CE}' | '\u{21CF}' | // ↚ ↛ ↮ ⇍ ⇎ ⇏
-        '\u{2197}' | '\u{2198}' | '\u{2196}' | '\u{2199}' // ↗ ↘ ↖ ↙
-    )
+/// A symbol as a node: an [`EqNode::Op`] if it is a binary operator or
+/// relation, otherwise [`EqNode::Text`].
+fn symbol_node(symbol: String) -> EqNode {
+    match op_kind(&symbol) {
+        Some(kind) => EqNode::Op { symbol, kind },
+        None => EqNode::Text(symbol),
+    }
 }
 
-/// Wrap a symbol text node with operator spacing if the first character is a spaced operator.
-fn maybe_wrap_op_spacing(symbol: String) -> EqNode {
-    if let Some(ch) = symbol.chars().next() {
-        if is_spaced_operator(ch) {
-            return EqNode::Seq(vec![
-                EqNode::Space(OP_SPACE),
-                EqNode::Text(symbol),
-                EqNode::Space(OP_SPACE),
-            ]);
+/// Push a node onto a sequence. A binary operator with no operand on its
+/// left (`-x`, `a = -b`, `(+1)`) becomes a unary [`EqNode::Text`].
+fn push_node(nodes: &mut Vec<EqNode>, node: EqNode) {
+    if let EqNode::Op { symbol, kind: OpKind::Binary } = &node {
+        let left = nodes.iter().rev().find(|n| !matches!(n, EqNode::Space(_)));
+        let has_left_operand = match left {
+            None => false,
+            Some(EqNode::Op { .. }) | Some(EqNode::BigOp { .. }) | Some(EqNode::Limit { .. }) => false,
+            Some(EqNode::Text(t)) => !matches!(t.as_str(), "(" | "[" | "{" | "," | ";" | "|" | ""),
+            Some(_) => true,
+        };
+        if !has_left_operand {
+            nodes.push(EqNode::Text(symbol.clone()));
+            return;
         }
     }
-    EqNode::Text(symbol)
+    nodes.push(node);
 }
 
 pub fn is_big_op(name: &str) -> bool {
@@ -165,18 +154,8 @@ fn negate_symbol(s: &str) -> String {
 /// Apply `\not` to an already-parsed atom.
 fn negate_node(node: EqNode) -> EqNode {
     match node {
-        EqNode::Text(s) if !s.is_empty() => maybe_wrap_op_spacing(negate_symbol(&s)),
-        EqNode::Seq(v)
-            if v.len() == 3
-                && matches!(v[0], EqNode::Space(_))
-                && matches!(v[2], EqNode::Space(_))
-                && matches!(&v[1], EqNode::Text(s) if !s.is_empty()) =>
-        {
-            match &v[1] {
-                EqNode::Text(s) => maybe_wrap_op_spacing(negate_symbol(s)),
-                _ => unreachable!(),
-            }
-        }
+        EqNode::Text(s) if !s.is_empty() => symbol_node(negate_symbol(&s)),
+        EqNode::Op { symbol, .. } => symbol_node(negate_symbol(&symbol)),
         EqNode::Text(_) => EqNode::Text("\\not".to_string()),
         other => EqNode::Seq(vec![EqNode::Text("\\not".to_string()), other]),
     }
@@ -461,6 +440,10 @@ impl EqParser {
             if self.at_sequence_stop(stop_on_paren, stop_on_right) {
                 break;
             }
+            if ch.is_whitespace() {
+                self.skip_whitespace();
+                continue;
+            }
             if self.skip_noop_command() {
                 continue;
             }
@@ -509,24 +492,7 @@ impl EqParser {
             }
             let atom = self.parse_atom();
             let node = self.parse_postfix(atom);
-            // Context-aware minus: add operator spacing only for binary minus
-            if let EqNode::Text(ref s) = node {
-                if s == "-" && !nodes.is_empty() {
-                    // Check if the previous node looks like an operand (not an operator/space)
-                    let is_binary = match nodes.last() {
-                        Some(EqNode::Space(_)) => false,
-                        Some(_) => true,
-                        None => false,
-                    };
-                    if is_binary {
-                        nodes.push(EqNode::Space(OP_SPACE));
-                        nodes.push(node);
-                        nodes.push(EqNode::Space(OP_SPACE));
-                        continue;
-                    }
-                }
-            }
-            nodes.push(node);
+            push_node(&mut nodes, node);
         }
         finish_nodes(nodes)
     }
@@ -588,13 +554,14 @@ impl EqParser {
                     }
                     '%' => self.skip_comment(),
                     _ if self.at_sequence_stop(false, false) => break,
+                    c if c.is_whitespace() => self.skip_whitespace(),
                     _ => {
                         if self.skip_noop_command() {
                             continue;
                         }
                         let atom = self.parse_atom();
                         let node = self.parse_postfix(atom);
-                        nodes.push(node);
+                        push_node(&mut nodes, node);
                     }
                 }
             }
@@ -630,10 +597,11 @@ impl EqParser {
                 ']' => break,
                 '}' if self.in_group => break,
                 '%' => self.skip_comment(),
+                c if c.is_whitespace() => self.skip_whitespace(),
                 _ => {
                     let atom = self.parse_atom();
                     let node = self.parse_postfix(atom);
-                    nodes.push(node);
+                    push_node(&mut nodes, node);
                 }
             }
         }
@@ -725,9 +693,7 @@ impl EqParser {
     }
 
     fn parse_atom(&mut self) -> EqNode {
-        while self.peek() == Some('%') {
-            self.skip_comment();
-        }
+        self.skip_whitespace_and_comments();
         match self.peek() {
             None => EqNode::Text(String::new()),
             Some('{') => self.parse_brace_group(),
@@ -790,28 +756,15 @@ impl EqParser {
                 }
                 EqNode::Text(s)
             }
-            Some(ch) if ch.is_whitespace() => {
-                // A run of whitespace (including newlines) is one space node.
-                self.skip_whitespace();
-                EqNode::Text(" ".into())
-            }
-            Some(ch @ ('+' | '=' | '<' | '>' | '*')) => {
+            Some('*') => {
                 self.advance();
-                let op = if ch == '*' { "\u{00B7}".to_string() } else { ch.to_string() };
-                EqNode::Seq(vec![
-                    EqNode::Space(OP_SPACE),
-                    EqNode::Text(op),
-                    EqNode::Space(OP_SPACE),
-                ])
-            }
-            Some('-') => {
-                // Handled in parse_sequence_until_ex for context-aware spacing
-                self.advance();
-                EqNode::Text("-".to_string())
+                symbol_node("\u{00B7}".to_string())
             }
             Some(ch) => {
+                // Operators (`+ - = < >` and typed Unicode like `≤`) become
+                // Op nodes; everything else is text.
                 self.advance();
-                EqNode::Text(ch.to_string())
+                symbol_node(ch.to_string())
             }
         }
     }
@@ -901,7 +854,7 @@ impl EqParser {
             if self.try_keyword(word) {
                 let symbol = latex_to_unicode(word)
                     .unwrap_or_else(|| word.to_string());
-                return Some(maybe_wrap_op_spacing(symbol));
+                return Some(symbol_node(symbol));
             }
         }
         None
@@ -1142,12 +1095,11 @@ impl EqParser {
                 };
                 let below = if self.peek() == Some('[') { Some(self.parse_bracket_arg()) } else { None };
                 let above = self.parse_group_atom();
-                let mut node = EqNode::Text(arrow.to_string());
+                let mut node = symbol_node(arrow.to_string());
                 if let Some(below) = below {
                     node = EqNode::StackRel { base: Box::new(node), annotation: Box::new(below), over: false };
                 }
-                node = EqNode::StackRel { base: Box::new(node), annotation: Box::new(above), over: true };
-                return EqNode::Seq(vec![EqNode::Space(OP_SPACE), node, EqNode::Space(OP_SPACE)]);
+                return EqNode::StackRel { base: Box::new(node), annotation: Box::new(above), over: true };
             }
 
             // Fractions (display/text style variants map to the same node)
@@ -1191,11 +1143,7 @@ impl EqParser {
 
             // Modular arithmetic
             "bmod" => {
-                return EqNode::Seq(vec![
-                    EqNode::Space(OP_SPACE),
-                    EqNode::Limit { name: "mod".to_string(), lower: None },
-                    EqNode::Space(OP_SPACE),
-                ]);
+                return EqNode::Op { symbol: "mod".to_string(), kind: OpKind::Binary };
             }
             "pmod" => {
                 let arg = self.parse_group_atom();
@@ -1289,8 +1237,10 @@ impl EqParser {
         }
 
         // Greek letter / symbol lookup
-        let symbol = latex_to_unicode(&name).unwrap_or_else(|| format!("\\{}", name));
-        maybe_wrap_op_spacing(symbol)
+        match latex_to_unicode(&name) {
+            Some(symbol) => symbol_node(symbol),
+            None => EqNode::Text(format!("\\{}", name)),
+        }
     }
 
     /// Parse \text{...} — consume braces and return raw text (no math parsing).
@@ -1587,286 +1537,6 @@ impl EqParser {
     }
 }
 
-/// Look up the Unicode character for a LaTeX command name.
-///
-/// Covers 270+ symbols: Greek letters (upper and lowercase, plus `var`
-/// variants), operators, relations and their negations, set theory, arrows,
-/// delimiters, and miscellaneous symbols.
-/// Returns `None` for anything it doesn't recognize.
-///
-/// This is useful on its own if you just need symbol conversion without
-/// parsing a full expression.
-///
-/// # Examples
-///
-/// ```
-/// use rust_latex_parser::latex_to_unicode;
-///
-/// assert_eq!(latex_to_unicode("alpha"), Some("α".to_string()));
-/// assert_eq!(latex_to_unicode("infty"), Some("∞".to_string()));
-/// assert_eq!(latex_to_unicode("rightarrow"), Some("→".to_string()));
-/// assert_eq!(latex_to_unicode("notacommand"), None);
-/// ```
-pub fn latex_to_unicode(name: &str) -> Option<String> {
-    let ch = match name {
-        // Greek lowercase
-        "alpha" => '\u{03B1}',
-        "beta" => '\u{03B2}',
-        "gamma" => '\u{03B3}',
-        "delta" => '\u{03B4}',
-        "epsilon" | "varepsilon" => '\u{03B5}',
-        "zeta" => '\u{03B6}',
-        "eta" => '\u{03B7}',
-        "theta" => '\u{03B8}',
-        "vartheta" => '\u{03D1}',
-        "iota" => '\u{03B9}',
-        "kappa" => '\u{03BA}',
-        "varkappa" => '\u{03F0}',
-        "lambda" => '\u{03BB}',
-        "mu" => '\u{03BC}',
-        "nu" => '\u{03BD}',
-        "xi" => '\u{03BE}',
-        "omicron" => '\u{03BF}',
-        "pi" => '\u{03C0}',
-        "varpi" => '\u{03D6}',
-        "rho" => '\u{03C1}',
-        "varrho" => '\u{03F1}',
-        "sigma" => '\u{03C3}',
-        "varsigma" => '\u{03C2}',
-        "tau" => '\u{03C4}',
-        "upsilon" => '\u{03C5}',
-        "phi" | "varphi" => '\u{03C6}',
-        "chi" => '\u{03C7}',
-        "psi" => '\u{03C8}',
-        "omega" => '\u{03C9}',
-        "digamma" => '\u{03DD}',
-        // Greek uppercase
-        "Alpha" => '\u{0391}',
-        "Beta" => '\u{0392}',
-        "Gamma" => '\u{0393}',
-        "Delta" => '\u{0394}',
-        "Epsilon" => '\u{0395}',
-        "Zeta" => '\u{0396}',
-        "Eta" => '\u{0397}',
-        "Theta" => '\u{0398}',
-        "Iota" => '\u{0399}',
-        "Kappa" => '\u{039A}',
-        "Lambda" => '\u{039B}',
-        "Mu" => '\u{039C}',
-        "Nu" => '\u{039D}',
-        "Xi" => '\u{039E}',
-        "Pi" => '\u{03A0}',
-        "Rho" => '\u{03A1}',
-        "Sigma" => '\u{03A3}',
-        "Tau" => '\u{03A4}',
-        "Upsilon" => '\u{03A5}',
-        "Phi" => '\u{03A6}',
-        "Chi" => '\u{03A7}',
-        "Psi" => '\u{03A8}',
-        "Omega" => '\u{03A9}',
-        // Operators
-        "pm" | "plusminus" => '\u{00B1}',
-        "mp" | "minusplus" => '\u{2213}',
-        "times" => '\u{00D7}',
-        "div" => '\u{00F7}',
-        "cdot" => '\u{00B7}',
-        "ast" => '\u{2217}',
-        "star" => '\u{22C6}',
-        "circ" => '\u{2218}',
-        "bullet" => '\u{2022}',
-        "oplus" => '\u{2295}',
-        "otimes" => '\u{2297}',
-        "ominus" => '\u{2296}',
-        "odot" => '\u{2299}',
-        "oslash" => '\u{2298}',
-        "dagger" | "dag" => '\u{2020}',
-        "ddagger" | "ddag" => '\u{2021}',
-        "sqcup" => '\u{2294}',
-        "sqcap" => '\u{2293}',
-        "uplus" => '\u{228E}',
-        "wr" => '\u{2240}',
-        "diamond" => '\u{22C4}',
-        "amalg" => '\u{2A3F}',
-        "bigcirc" => '\u{25EF}',
-        "triangleleft" => '\u{25C1}',
-        "triangleright" => '\u{25B7}',
-        "lhd" => '\u{22B2}',
-        "rhd" => '\u{22B3}',
-        "ltimes" => '\u{22C9}',
-        "rtimes" => '\u{22CA}',
-        // Relations
-        "leq" | "le" => '\u{2264}',
-        "geq" | "ge" => '\u{2265}',
-        "neq" | "ne" => '\u{2260}',
-        "approx" => '\u{2248}',
-        "equiv" => '\u{2261}',
-        "sim" => '\u{223C}',
-        "simeq" => '\u{2243}',
-        "cong" => '\u{2245}',
-        "propto" => '\u{221D}',
-        "ll" => '\u{226A}',
-        "gg" => '\u{226B}',
-        "prec" => '\u{227A}',
-        "succ" => '\u{227B}',
-        "perp" => '\u{22A5}',
-        "parallel" => '\u{2225}',
-        "nparallel" => '\u{2226}',
-        "mid" => '\u{2223}',
-        "nmid" => '\u{2224}',
-        "nleq" => '\u{2270}',
-        "ngeq" => '\u{2271}',
-        "leqslant" => '\u{2A7D}',
-        "geqslant" => '\u{2A7E}',
-        "nless" => '\u{226E}',
-        "ngtr" => '\u{226F}',
-        "nequiv" => '\u{2262}',
-        "nsim" => '\u{2241}',
-        "ncong" => '\u{2247}',
-        "lesssim" => '\u{2272}',
-        "gtrsim" => '\u{2273}',
-        "coloneqq" => '\u{2254}',
-        "doteq" => '\u{2250}',
-        "asymp" => '\u{224D}',
-        "vdash" => '\u{22A2}',
-        "dashv" => '\u{22A3}',
-        "models" => '\u{22A8}',
-        "bowtie" => '\u{22C8}',
-        "smile" => '\u{2323}',
-        "frown" => '\u{2322}',
-        // Logic & sets
-        "forall" => '\u{2200}',
-        "exists" => '\u{2203}',
-        "nexists" => '\u{2204}',
-        "neg" | "lnot" => '\u{00AC}',
-        "land" | "wedge" => '\u{2227}',
-        "lor" | "vee" => '\u{2228}',
-        "in" => '\u{2208}',
-        "notin" => '\u{2209}',
-        "ni" => '\u{220B}',
-        "subset" => '\u{2282}',
-        "supset" => '\u{2283}',
-        "subseteq" => '\u{2286}',
-        "supseteq" => '\u{2287}',
-        "subsetneq" => '\u{228A}',
-        "supsetneq" => '\u{228B}',
-        "nsubseteq" => '\u{2288}',
-        "nsupseteq" => '\u{2289}',
-        "sqsubseteq" => '\u{2291}',
-        "sqsupseteq" => '\u{2292}',
-        "complement" => '\u{2201}',
-        "cup" => '\u{222A}',
-        "cap" => '\u{2229}',
-        "emptyset" | "varnothing" => '\u{2205}',
-        "setminus" => '\u{2216}',
-        // Arrows
-        "rightarrow" | "to" => '\u{2192}',
-        "leftarrow" | "gets" => '\u{2190}',
-        "leftrightarrow" => '\u{2194}',
-        "Rightarrow" | "implies" => '\u{21D2}',
-        "Leftarrow" => '\u{21D0}',
-        "Leftrightarrow" | "iff" => '\u{21D4}',
-        "uparrow" => '\u{2191}',
-        "downarrow" => '\u{2193}',
-        "mapsto" => '\u{21A6}',
-        "hookrightarrow" => '\u{21AA}',
-        "hookleftarrow" => '\u{21A9}',
-        "longrightarrow" => '\u{27F6}',
-        "longleftarrow" => '\u{27F5}',
-        "longleftrightarrow" => '\u{27F7}',
-        "Longrightarrow" => '\u{27F9}',
-        "Longleftarrow" | "impliedby" => '\u{27F8}',
-        "Longleftrightarrow" => '\u{27FA}',
-        "longmapsto" => '\u{27FC}',
-        "Uparrow" => '\u{21D1}',
-        "Downarrow" => '\u{21D3}',
-        "updownarrow" => '\u{2195}',
-        "Updownarrow" => '\u{21D5}',
-        "nearrow" => '\u{2197}',
-        "searrow" => '\u{2198}',
-        "nwarrow" => '\u{2196}',
-        "swarrow" => '\u{2199}',
-        "rightleftharpoons" => '\u{21CC}',
-        "leftrightharpoons" => '\u{21CB}',
-        "rightharpoonup" => '\u{21C0}',
-        "rightharpoondown" => '\u{21C1}',
-        "leftharpoonup" => '\u{21BC}',
-        "leftharpoondown" => '\u{21BD}',
-        "nrightarrow" => '\u{219B}',
-        "nleftarrow" => '\u{219A}',
-        "nRightarrow" => '\u{21CF}',
-        "nLeftarrow" => '\u{21CD}',
-        "nLeftrightarrow" => '\u{21CE}',
-        // Misc
-        "infty" | "inf" => '\u{221E}',
-        "partial" => '\u{2202}',
-        "nabla" => '\u{2207}',
-        "hbar" => '\u{210F}',
-        "ell" => '\u{2113}',
-        "Re" => '\u{211C}',
-        "Im" => '\u{2111}',
-        "wp" => '\u{2118}',
-        "aleph" => '\u{2135}',
-        "angle" => '\u{2220}',
-        "triangle" => '\u{25B3}',
-        "triangledown" => '\u{25BD}',
-        "top" => '\u{22A4}',
-        "bot" => '\u{22A5}',
-        "square" | "Box" => '\u{25A1}',
-        "blacksquare" => '\u{25A0}',
-        "lozenge" => '\u{25CA}',
-        "bigstar" => '\u{2605}',
-        "checkmark" => '\u{2713}',
-        "therefore" => '\u{2234}',
-        "because" => '\u{2235}',
-        "imath" => '\u{0131}',
-        "jmath" => '\u{0237}',
-        "beth" => '\u{2136}',
-        "gimel" => '\u{2137}',
-        "daleth" => '\u{2138}',
-        "mho" => '\u{2127}',
-        "eth" => '\u{00F0}',
-        "flat" => '\u{266D}',
-        "sharp" => '\u{266F}',
-        "natural" => '\u{266E}',
-        "clubsuit" => '\u{2663}',
-        "diamondsuit" => '\u{2662}',
-        "heartsuit" => '\u{2661}',
-        "spadesuit" => '\u{2660}',
-        "surd" => '\u{221A}',
-        "measuredangle" => '\u{2221}',
-        "sphericalangle" => '\u{2222}',
-        "backprime" => '\u{2035}',
-        "copyright" => '\u{00A9}',
-        "pounds" => '\u{00A3}',
-        "S" => '\u{00A7}',
-        "P" => '\u{00B6}',
-        "colon" => ':',
-        "degree" | "deg" => '\u{00B0}',
-        "prime" => '\u{2032}',
-        "dots" | "ldots" | "dotsc" | "dotso" => '\u{2026}',
-        "cdots" | "dotsb" | "dotsm" | "dotsi" => '\u{22EF}',
-        "iddots" => '\u{22F0}',
-        "vdots" => '\u{22EE}',
-        "ddots" => '\u{22F1}',
-        // Delimiters
-        "langle" => '\u{27E8}',
-        "rangle" => '\u{27E9}',
-        "lceil" => '\u{2308}',
-        "rceil" => '\u{2309}',
-        "lfloor" => '\u{230A}',
-        "rfloor" => '\u{230B}',
-        "vert" | "lvert" | "rvert" => '|',
-        "Vert" | "lVert" | "rVert" => '\u{2016}',
-        "lbrace" => '{',
-        "rbrace" => '}',
-        "lbrack" => '[',
-        "rbrack" => ']',
-        "backslash" => '\\',
-        _ => return None,
-    };
-    Some(ch.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1881,6 +1551,7 @@ mod tests {
     fn collect_text(node: &EqNode) -> String {
         match node {
             EqNode::Text(s) => s.clone(),
+            EqNode::Op { symbol, .. } => symbol.clone(),
             EqNode::Space(_) => String::new(),
             EqNode::Seq(nodes) => nodes.iter().map(collect_text).collect(),
             EqNode::Sup(base, sup) => format!("{}^{}", collect_text(base), collect_text(sup)),
@@ -2149,64 +1820,66 @@ mod tests {
 
     // ─── Operator spacing ───────────────────────────────────────────
 
-    #[test]
-    fn parse_plus_gets_spacing() {
-        let node = parse_equation("a + b");
-        // Should produce a tree that contains Space nodes (may be nested)
-        fn has_space(node: &EqNode) -> bool {
-            match node {
-                EqNode::Space(_) => true,
-                EqNode::Seq(nodes) => nodes.iter().any(has_space),
-                _ => false,
-            }
-        }
-        assert!(has_space(&node), "Plus should have space nodes in tree");
+    fn op(symbol: &str, kind: OpKind) -> EqNode {
+        EqNode::Op { symbol: symbol.to_string(), kind }
     }
 
     #[test]
-    fn parse_unary_minus_no_spacing() {
-        let node = parse_equation("-x");
-        // Leading minus should NOT have spacing (it's unary)
-        let text = collect_text(&node);
-        assert!(text.starts_with("-") || text.contains("-x"));
+    fn parse_plus_is_binary_op() {
+        assert_eq!(
+            parse_equation("a + b"),
+            EqNode::Seq(vec![EqNode::Text("a".into()), op("+", OpKind::Binary), EqNode::Text("b".into())])
+        );
     }
 
     #[test]
-    fn parse_binary_minus_gets_spacing() {
-        let node = parse_equation("a - b");
-        if let EqNode::Seq(nodes) = &node {
-            // Should have Space nodes (binary minus gets spacing)
-            let space_count = nodes.iter().filter(|n| matches!(n, EqNode::Space(_))).count();
-            assert!(space_count >= 2, "Binary minus should have spaces: got {space_count}");
-        }
-    }
-
-    // ─── Relation symbol spacing ────────────────────────────────────
-
-    #[test]
-    fn parse_neq_gets_spacing() {
-        let node = parse_equation("a \\neq b");
-        fn has_space(node: &EqNode) -> bool {
-            match node {
-                EqNode::Space(_) => true,
-                EqNode::Seq(nodes) => nodes.iter().any(has_space),
-                _ => false,
-            }
-        }
-        assert!(has_space(&node), "\\neq should get operator spacing");
+    fn parse_unary_minus_is_text() {
+        assert_eq!(
+            parse_equation("-x"),
+            EqNode::Seq(vec![EqNode::Text("-".into()), EqNode::Text("x".into())])
+        );
+        // After a relation, minus is unary too.
+        assert_eq!(
+            parse_equation("a = -b"),
+            EqNode::Seq(vec![
+                EqNode::Text("a".into()),
+                op("=", OpKind::Relation),
+                EqNode::Text("-".into()),
+                EqNode::Text("b".into()),
+            ])
+        );
     }
 
     #[test]
-    fn parse_leq_gets_spacing() {
-        let node = parse_equation("x \\leq y");
-        fn has_space(node: &EqNode) -> bool {
-            match node {
-                EqNode::Space(_) => true,
-                EqNode::Seq(nodes) => nodes.iter().any(has_space),
-                _ => false,
-            }
-        }
-        assert!(has_space(&node), "\\leq should get operator spacing");
+    fn parse_binary_minus_is_op() {
+        assert_eq!(
+            parse_equation("a - b"),
+            EqNode::Seq(vec![EqNode::Text("a".into()), op("-", OpKind::Binary), EqNode::Text("b".into())])
+        );
+    }
+
+    // ─── Relation symbols ───────────────────────────────────────────
+
+    #[test]
+    fn parse_neq_is_relation() {
+        assert_eq!(
+            parse_equation("a \\neq b"),
+            EqNode::Seq(vec![EqNode::Text("a".into()), op("≠", OpKind::Relation), EqNode::Text("b".into())])
+        );
+    }
+
+    #[test]
+    fn parse_leq_is_relation() {
+        assert!(matches!(
+            parse_equation("x \\leq y"),
+            EqNode::Seq(v) if v[1] == op("≤", OpKind::Relation)
+        ));
+    }
+
+    #[test]
+    fn whitespace_produces_no_nodes() {
+        assert_eq!(parse_equation("a  \n b"), parse_equation("ab"));
+        assert_eq!(parse_equation("   "), EqNode::Text(String::new()));
     }
 
     // ─── Environments ───────────────────────────────────────────────

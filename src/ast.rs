@@ -39,15 +39,27 @@
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum EqNode {
-    /// Plain text — a variable name, number, operator character, or Unicode symbol.
+    /// Plain text — a variable name, number, punctuation, or Unicode symbol.
     ///
-    /// Examples: `"x"`, `"42"`, `"+"`, `"α"`, `"∑"`.
+    /// Examples: `"x"`, `"42"`, `"("`, `"α"`, `"∞"`. A unary minus (as in
+    /// `-x`) is `Text("-")`.
+    ///
+    /// Commands the parser doesn't recognize, and stray structural tokens,
+    /// are kept as text too (`"\\foo"`, `"}"`), so no input is lost.
     Text(String),
 
-    /// Horizontal space, measured in points.
+    /// A binary operator or relation, such as `+`, `=`, `≤` or `→`.
     ///
-    /// Inserted automatically around binary operators (`+`, `=`, `\leq`, etc.)
-    /// and by explicit spacing commands (`\quad`, `\,`, `\;`).
+    /// The tree records what the symbol *is*; spacing is up to the renderer.
+    /// See [`OpKind`] for the classes. Produced by `+ - * = < >`, commands
+    /// like `\leq` and `\cup`, typed Unicode symbols like `≤`, and ASCII
+    /// shortcuts like `<=` and `->`.
+    Op { symbol: String, kind: OpKind },
+
+    /// Explicit horizontal space, in units where `\quad` (1em) is 18.
+    ///
+    /// Only produced by spacing commands (`\quad`, `\,`, `\;`, `\hspace{..}`),
+    /// never for ordinary whitespace in the input, which is insignificant.
     /// Can be negative (e.g. `\!` produces `Space(-3.0)`).
     Space(f32),
 
@@ -203,8 +215,10 @@ pub enum EqNode {
     /// Produced by `\overset{def}{=}` (over=true), `\underset{lim}{=}`
     /// (over=false), or `\stackrel{above}{base}` (over=true).
     ///
-    /// Extensible arrows like `\xrightarrow[below]{above}` are also built
-    /// from nested `StackRel` nodes around the arrow symbol.
+    /// A `StackRel` takes the spacing class of its base, so `\overset{def}{=}`
+    /// is spaced like a relation. Extensible arrows like
+    /// `\xrightarrow[below]{above}` are built from nested `StackRel` nodes
+    /// around an [`EqNode::Op`] arrow.
     StackRel { base: Box<EqNode>, annotation: Box<EqNode>, over: bool },
 
     /// Colored subexpression.
@@ -220,6 +234,20 @@ pub enum EqNode {
     /// Produced by `\boxed{x}`, `\fbox{text}`, `\cancel{x}`, `\bcancel{x}`
     /// and `\xcancel{x}`. See [`EncloseKind`].
     Enclose { kind: EncloseKind, content: Box<EqNode> },
+}
+
+/// The spacing class of an [`EqNode::Op`].
+///
+/// Following TeX: binary operators get a medium space on each side,
+/// relations a slightly wider one. A binary operator with nothing on its
+/// left (like the `-` in `-x`) is parsed as a unary [`EqNode::Text`] instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum OpKind {
+    /// `+`, `-`, `×`, `·`, `∪`, `∧`, `⊕`, `\bmod`, ...
+    Binary,
+    /// `=`, `<`, `≤`, `≠`, `∈`, `⊂`, `→`, `⇒`, `∣`, ...
+    Relation,
 }
 
 /// The kind of accent mark in an [`EqNode::Accent`] node.

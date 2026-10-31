@@ -18,6 +18,7 @@ pub fn sx(node: &EqNode) -> String {
     }
     match node {
         EqNode::Text(s) => s.clone(),
+        EqNode::Op { symbol, .. } => symbol.clone(),
         EqNode::Space(_) => String::new(),
         EqNode::Seq(nodes) => {
             let parts: Vec<String> = nodes
@@ -80,7 +81,7 @@ pub fn all_text(node: &EqNode) -> String {
 fn collect(node: &EqNode, out: &mut String) {
     let mut each = |n: &EqNode| collect(n, out);
     match node {
-        EqNode::Text(s) | EqNode::TextBlock(s) => out.push_str(s),
+        EqNode::Text(s) | EqNode::TextBlock(s) | EqNode::Op { symbol: s, .. } => out.push_str(s),
         EqNode::Space(_) => {}
         EqNode::Seq(v) => v.iter().for_each(each),
         EqNode::Sup(a, b) | EqNode::Sub(a, b) | EqNode::Frac(a, b) | EqNode::Binom(a, b) => {

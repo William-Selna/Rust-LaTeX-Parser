@@ -67,6 +67,10 @@
 
 pub mod ast;
 pub mod parser;
+mod symbols;
 
-pub use ast::{AccentKind, ArrayColumn, EncloseKind, EqMetrics, EqNode, MathFontKind, MatrixKind};
-pub use parser::{latex_to_unicode, parse_equation};
+pub use ast::{
+    AccentKind, ArrayColumn, EncloseKind, EqMetrics, EqNode, MathFontKind, MatrixKind, OpKind,
+};
+pub use parser::parse_equation;
+pub use symbols::{latex_to_unicode, op_kind, symbols, unicode_to_latex};
