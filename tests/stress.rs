@@ -206,9 +206,12 @@ fn every_prefix_of_real_expressions() {
 
 // ─── Scaling ────────────────────────────────────────────────────────
 
+const SMALL: usize = 1_000;
+const LARGE: usize = 4 * SMALL;
+
 /// Time `f` on inputs of size `n` and `4n`. Linear work grows ~4x; flag
 /// anything that grows much faster (quadratic would be ~16x).
-fn assert_linear(name: &str, make: impl Fn(usize) -> String, f: impl Fn(&str)) {
+fn assert_linear<T>(name: &str, make: impl Fn(usize) -> T, f: impl Fn(&T)) {
     let time = |n: usize| {
         let input = make(n);
         f(&input); // warm up
@@ -220,8 +223,8 @@ fn assert_linear(name: &str, make: impl Fn(usize) -> String, f: impl Fn(&str)) {
         }
         best
     };
-    let small = time(1_000);
-    let large = time(4_000);
+    let small = time(SMALL);
+    let large = time(LARGE);
     let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
     assert!(ratio < 9.0, "{}: 4x input took {:.1}x longer ({:?} -> {:?})", name, ratio, small, large);
 }
@@ -267,7 +270,7 @@ fn shapes() -> Vec<Shape> {
 #[test]
 fn parsing_scales_linearly() {
     for (name, make) in shapes() {
-        assert_linear(name, make, |s| {
+        assert_linear(name, make, |s: &String| {
             let _ = parse_equation(s);
         });
     }
@@ -278,18 +281,20 @@ fn parsing_scales_linearly() {
 fn outputs_scale_linearly() {
     use rust_latex_parser::*;
     for (name, make) in shapes() {
-        let tree_of = |s: &str| parse_equation(s);
-        assert_linear(&format!("latex/{}", name), make, |s| {
-            let _ = to_latex(&tree_of(s));
+        // Parse once, outside the timed part, so only the output is measured.
+        let (small, large) = (parse_equation(&make(SMALL)), parse_equation(&make(LARGE)));
+        let tree = |n| if n == SMALL { small.clone() } else { large.clone() };
+        assert_linear(&format!("latex/{}", name), tree, |t| {
+            let _ = to_latex(t);
         });
-        assert_linear(&format!("mathml/{}", name), make, |s| {
-            let _ = to_mathml(&tree_of(s), MathDisplay::Block);
+        assert_linear(&format!("mathml/{}", name), tree, |t| {
+            let _ = to_mathml(t, MathDisplay::Block);
         });
-        assert_linear(&format!("unicode/{}", name), make, |s| {
-            let _ = to_unicode(&tree_of(s));
+        assert_linear(&format!("unicode/{}", name), tree, |t| {
+            let _ = to_unicode(t);
         });
-        assert_linear(&format!("svg/{}", name), make, |s| {
-            let _ = to_svg(&tree_of(s), &SvgOptions::default());
+        assert_linear(&format!("svg/{}", name), tree, |t| {
+            let _ = to_svg(t, &SvgOptions::default());
         });
     }
 }
