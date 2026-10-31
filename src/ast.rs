@@ -152,6 +152,13 @@ pub enum EqNode {
     /// produces an empty string.
     Delimited { left: String, right: String, content: Box<EqNode> },
 
+    /// A delimiter between `\left` and `\right` that stretches to the same
+    /// height, as in set-builder notation `\left\{ x \middle| x > 0 \right\}`.
+    ///
+    /// Produced by `\middle`. The string is converted the same way as in
+    /// [`EqNode::Delimited`].
+    Middle(String),
+
     /// A manually sized delimiter.
     ///
     /// Produced by `\big(`, `\Big[`, `\bigg\{`, `\Bigg|` and their

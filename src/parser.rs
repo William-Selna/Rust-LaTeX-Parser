@@ -23,6 +23,7 @@
 
 use crate::ast::*;
 pub use crate::symbols::latex_to_unicode;
+use crate::output::unstyle_char;
 use crate::symbols::op_kind;
 
 /// Width of `\quad` (1em). Other units are scaled relative to this.
@@ -44,8 +45,35 @@ const NOOP_COMMANDS: &[&str] = &[
     "nobreak", "allowbreak",
 ];
 
+/// Limit operators recognized without a backslash (`sin x`, `lim_(x->0)`).
+const BARE_LIMIT_OPS: &[&str] = &[
+    "liminf", "limsup", "lim",
+    "arcsin", "arccos", "arctan",
+    "sinh", "cosh", "tanh",
+    "sin", "cos", "tan", "cot", "sec", "csc",
+    "log", "ln", "exp",
+    "min", "max", "det", "dim", "ker", "gcd", "arg",
+];
+
+/// Greek letters and symbols recognized without a backslash (`pi`, `alpha`).
+/// Sorted longest-first so `epsilon` wins over `eta`.
+const BAREWORDS: &[&str] = &[
+    "varepsilon", "rightarrow", "leftarrow", "Rightarrow", "Leftarrow",
+    "subseteq", "supseteq", "vartheta", "varsigma", "infinity",
+    "epsilon", "upsilon", "omicron", "lambda", "Lambda", "implies", "Upsilon",
+    "partial", "emptyset", "varphi", "varrho", "subset", "supset",
+    "alpha", "beta", "gamma", "delta", "theta", "kappa", "sigma",
+    "omega", "Gamma", "Delta", "Theta", "Sigma", "Omega", "varpi",
+    "infty", "nabla", "forall", "exists", "approx", "equiv", "notin",
+    "times", "cdots", "ldots",
+    "cdot", "zeta", "iota", "neq", "leq", "geq",
+    "pi", "rho", "tau", "phi", "chi", "psi",
+    "eta", "nu", "xi", "mu", "Pi", "Phi", "Psi", "Xi",
+    "pm",
+];
+
 /// Named limit-style operators (`\lim`, `\sin`, ...), rendered upright.
-const LIMIT_OPS: &[&str] = &[
+pub(crate) const LIMIT_OPS: &[&str] = &[
     "lim", "liminf", "limsup",
     "min", "max", "sup", "inf",
     "log", "lg", "ln", "exp",
@@ -71,7 +99,7 @@ fn push_node(nodes: &mut Vec<EqNode>, node: EqNode) {
         let left = nodes.iter().rev().find(|n| !matches!(n, EqNode::Space(_)));
         let has_left_operand = match left {
             None => false,
-            Some(EqNode::Op { .. }) | Some(EqNode::BigOp { .. }) | Some(EqNode::Limit { .. }) => false,
+            Some(EqNode::Op { .. }) | Some(EqNode::BigOp { .. }) | Some(EqNode::Limit { .. }) | Some(EqNode::Middle(_)) => false,
             Some(EqNode::Text(t)) => !matches!(t.as_str(), "(" | "[" | "{" | "," | ";" | "|" | ""),
             Some(_) => true,
         };
@@ -81,6 +109,21 @@ fn push_node(nodes: &mut Vec<EqNode>, node: EqNode) {
         }
     }
     nodes.push(node);
+}
+
+/// Whether a run of letters ending in `word` would be read as a bareword
+/// shortcut (`pi`, `sin`, `sqrt`, ...) rather than separate letters. Used by
+/// the LaTeX writer to decide where letters need a separating space.
+pub(crate) fn is_bareword(word: &str) -> bool {
+    word == "sqrt"
+        || BIG_OP_COMMANDS.contains(&word)
+        || BARE_LIMIT_OPS.contains(&word)
+        || BAREWORDS.contains(&word)
+}
+
+/// Whether `word` followed by `(` is a function-style shortcut like `abs(`.
+pub(crate) fn is_function_word(word: &str) -> bool {
+    FUNCTION_WORDS.contains(&word)
 }
 
 pub fn is_big_op(name: &str) -> bool {
@@ -146,6 +189,11 @@ fn negate_symbol(s: &str) -> String {
         '\u{21D2}' => '\u{21CF}',
         '\u{21D0}' => '\u{21CD}',
         '\u{21D4}' => '\u{21CE}',
+        '\u{22A2}' => '\u{22AC}',
+        '\u{22A8}' => '\u{22AD}',
+        '\u{2291}' => '\u{22E2}',
+        '\u{2292}' => '\u{22E3}',
+        '\u{224D}' => '\u{226D}',
         _ => return format!("{}\u{0338}", s),
     };
     negated.to_string()
@@ -154,9 +202,14 @@ fn negate_symbol(s: &str) -> String {
 /// Apply `\not` to an already-parsed atom.
 fn negate_node(node: EqNode) -> EqNode {
     match node {
-        EqNode::Text(s) if !s.is_empty() => symbol_node(negate_symbol(&s)),
+        // Ordinary symbols are only negated if they have a precomposed
+        // negation (`\not\exists` is `∄`); `\not` before anything else is
+        // kept as text.
+        EqNode::Text(s) if s.chars().count() == 1 && !negate_symbol(&s).ends_with('\u{0338}') => {
+            symbol_node(negate_symbol(&s))
+        }
         EqNode::Op { symbol, .. } => symbol_node(negate_symbol(&symbol)),
-        EqNode::Text(_) => EqNode::Text("\\not".to_string()),
+        EqNode::Text(s) if s.is_empty() => EqNode::Text("\\not".to_string()),
         other => EqNode::Seq(vec![EqNode::Text("\\not".to_string()), other]),
     }
 }
@@ -178,7 +231,7 @@ enum SeqMode {
 /// separators, opening brackets and big operators end an operand.
 fn is_operand(node: &EqNode) -> bool {
     match node {
-        EqNode::Op { .. } | EqNode::Space(_) | EqNode::BigOp { .. } => false,
+        EqNode::Op { .. } | EqNode::Space(_) | EqNode::BigOp { .. } | EqNode::Middle(_) => false,
         EqNode::Text(t) => !matches!(
             t.as_str(),
             "" | "(" | "[" | "{" | "," | ";" | ":" | "|" | "-" | "+" | "\u{00B1}" | "\u{2213}" | "\u{2212}"
@@ -371,6 +424,7 @@ fn parse_dimension(s: &str) -> Option<f32> {
 
 /// Read a balanced `{...}` group from `chars` starting at `*i` (which must
 /// point at `{`). Returns the inner text and advances `*i` past the group.
+/// Escaped braces (`\{`, `\}`) don't count towards the nesting.
 fn take_braced(chars: &[char], i: &mut usize) -> String {
     let mut out = String::new();
     if chars.get(*i) != Some(&'{') {
@@ -381,6 +435,15 @@ fn take_braced(chars: &[char], i: &mut usize) -> String {
     while let Some(&c) = chars.get(*i) {
         *i += 1;
         match c {
+            '\\' => {
+                // Keep the escape and the escaped character together.
+                out.push(c);
+                if let Some(&next) = chars.get(*i) {
+                    out.push(next);
+                    *i += 1;
+                }
+                continue;
+            }
             '{' => depth += 1,
             '}' => {
                 depth -= 1;
@@ -838,6 +901,20 @@ impl EqParser {
         }
     }
 
+    /// Consume a run of Unicode superscript (or subscript) characters and
+    /// parse their plain equivalents: `²³` is `23`, `₍ᵢ₊₁₎` is `(i+1)`.
+    fn take_unicode_script(&mut self, superscript: bool) -> EqNode {
+        let mut plain = String::new();
+        while let Some((is_sup, p)) = self.peek().and_then(unicode_script) {
+            if is_sup != superscript {
+                break;
+            }
+            plain.push(p);
+            self.advance();
+        }
+        parse_equation(&plain)
+    }
+
     /// Parse the argument of a `^` or `_`. A parenthesized group is taken
     /// whole, with the parentheses dropped: `x^(n+1)`, `sum_(i=1)^n`.
     fn parse_script_arg(&mut self) -> EqNode {
@@ -967,6 +1044,14 @@ impl EqParser {
                 }
                 self.pos = save;
             }
+            if let Some((is_sup, _)) = self.peek().and_then(unicode_script) {
+                // Typed Unicode limits: ∫₀¹, ∑ᵢ₌₁ⁿ
+                if (is_sup && upper.is_none()) || (!is_sup && lower.is_none()) {
+                    let script = self.take_unicode_script(is_sup);
+                    if is_sup { upper = Some(script) } else { lower = Some(script) }
+                    continue;
+                }
+            }
             match self.peek_past_whitespace() {
                 Some('^') if upper.is_none() => {
                     self.skip_whitespace();
@@ -1049,14 +1134,7 @@ impl EqParser {
                     }
                 }
                 // Try bare-word limit operators (lim, sin, cos, log, etc.)
-                static BARE_LIMIT_OPS: &[&str] = &[
-                    "liminf", "limsup", "lim",
-                    "arcsin", "arccos", "arctan",
-                    "sinh", "cosh", "tanh",
-                    "sin", "cos", "tan", "cot", "sec", "csc",
-                    "log", "ln", "exp",
-                    "min", "max", "det", "dim", "ker", "gcd", "arg",
-                ];
+
                 for &kw in BARE_LIMIT_OPS {
                     if self.try_keyword(kw) {
                         let lower = self.parse_limit_lower();
@@ -1119,6 +1197,12 @@ impl EqParser {
                 self.pos += len;
                 symbol_node(symbol.to_string())
             }
+            Some(ch) if !ch.is_ascii() && unstyle_char(ch).is_some() => {
+                // Typed or pasted math letters like `ℝ` or `𝐱`.
+                self.advance();
+                let (kind, plain) = unstyle_char(ch).unwrap();
+                EqNode::MathFont { kind, content: Box::new(EqNode::Text(plain.to_string())) }
+            }
             Some(ch) => {
                 // Operators (`+ - = < >` and typed Unicode like `≤`) become
                 // Op nodes; everything else is text.
@@ -1151,15 +1235,7 @@ impl EqParser {
                 // Typed Unicode scripts: x², a₁, eⁱⁿ
                 let slot = if is_sup { &sup } else { &sub };
                 if slot.is_none() {
-                    let mut plain = String::new();
-                    while let Some((s2, p)) = self.peek().and_then(unicode_script) {
-                        if s2 != is_sup {
-                            break;
-                        }
-                        plain.push(p);
-                        self.advance();
-                    }
-                    let node = parse_equation(&plain);
+                    let node = self.take_unicode_script(is_sup);
                     if is_sup { sup = Some(node) } else { sub = Some(node) }
                     continue;
                 }
@@ -1224,21 +1300,7 @@ impl EqParser {
     /// Try to match a bare-word Greek letter or common symbol at the current position.
     /// Tries longest match first to avoid ambiguity (e.g. "epsilon" before "eta").
     fn try_bareword_symbol(&mut self) -> Option<EqNode> {
-        // Sorted longest-first so we match "epsilon" before "eta", "theta" before "the", etc.
-        static BAREWORDS: &[&str] = &[
-            "varepsilon", "rightarrow", "leftarrow", "Rightarrow", "Leftarrow",
-            "subseteq", "supseteq", "vartheta", "varsigma", "infinity",
-            "epsilon", "upsilon", "omicron", "lambda", "Lambda", "implies", "Upsilon",
-            "partial", "emptyset", "varphi", "varrho", "subset", "supset",
-            "alpha", "beta", "gamma", "delta", "theta", "kappa", "sigma",
-            "omega", "Gamma", "Delta", "Theta", "Sigma", "Omega", "varpi",
-            "infty", "nabla", "forall", "exists", "approx", "equiv", "notin",
-            "times", "cdots", "ldots",
-            "cdot", "zeta", "iota", "neq", "leq", "geq",
-            "pi", "rho", "tau", "phi", "chi", "psi",
-            "eta", "nu", "xi", "mu", "Pi", "Phi", "Psi", "Xi",
-            "pm",
-        ];
+
         for &word in BAREWORDS {
             if self.try_keyword(word) {
                 let name = if word == "infinity" { "infty" } else { word };
@@ -1396,7 +1458,7 @@ impl EqParser {
             // \left ... \right — stretchy delimiters
             "left" => return self.parse_left_right(),
             // \middle| inside \left...\right
-            "middle" => return EqNode::Text(self.parse_delimiter()),
+            "middle" => return EqNode::Middle(self.parse_delimiter()),
 
             // \big( \Bigl[ \biggr\} ...
             "big" | "bigl" | "bigr" | "bigm"
@@ -1627,6 +1689,8 @@ impl EqParser {
 
         // Greek letter / symbol lookup
         match latex_to_unicode(&name) {
+            // `⊥` is a relation as `\perp` but an ordinary symbol as `\bot`.
+            Some(symbol) if name == "perp" => EqNode::Op { symbol, kind: OpKind::Relation },
             Some(symbol) => symbol_node(symbol),
             None => EqNode::Text(format!("\\{}", name)),
         }
@@ -1634,7 +1698,9 @@ impl EqParser {
 
     /// Parse \text{...} — consume braces and return raw text (no math parsing).
     fn parse_text_block(&mut self) -> EqNode {
-        EqNode::TextBlock(self.parse_brace_arg_opt().unwrap_or_default())
+        let raw = self.parse_brace_arg_opt().unwrap_or_default();
+        // `\{` and `\}` are literal braces in text; other content is kept raw.
+        EqNode::TextBlock(raw.replace("\\{", "{").replace("\\}", "}"))
     }
 
     /// Parse a delimiter after `\left`, `\right`, `\middle` or `\big`.
@@ -1940,7 +2006,7 @@ mod tests {
     fn collect_text(node: &EqNode) -> String {
         match node {
             EqNode::Text(s) => s.clone(),
-            EqNode::Op { symbol, .. } => symbol.clone(),
+            EqNode::Op { symbol, .. } | EqNode::Middle(symbol) => symbol.clone(),
             EqNode::Space(_) => String::new(),
             EqNode::Seq(nodes) => nodes.iter().map(collect_text).collect(),
             EqNode::Sup(base, sup) => format!("{}^{}", collect_text(base), collect_text(sup)),

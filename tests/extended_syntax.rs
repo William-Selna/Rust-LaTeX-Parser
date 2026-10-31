@@ -268,7 +268,7 @@ fn left_does_not_stop_on_rightarrow() {
 fn middle_delimiter_in_set_builder() {
     assert_eq!(
         p("\\left\\{ x \\middle| x > 0 \\right\\}"),
-        "(delim \"{\" \"}\" (seq x | x > 0))"
+        "(delim \"{\" \"}\" (seq x (middle \"|\") x > 0))"
     );
 }
 

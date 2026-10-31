@@ -66,11 +66,13 @@
 //! `\limits` and `\label{...}`.
 
 pub mod ast;
+pub mod output;
 pub mod parser;
 mod symbols;
 
 pub use ast::{
     AccentKind, ArrayColumn, EncloseKind, EqMetrics, EqNode, MathFontKind, MatrixKind, OpKind,
 };
+pub use output::{to_latex, to_mathml, to_unicode, MathDisplay};
 pub use parser::parse_equation;
 pub use symbols::{latex_to_unicode, op_kind, symbols, unicode_to_latex};

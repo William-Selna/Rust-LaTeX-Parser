@@ -45,6 +45,7 @@ pub fn sx(node: &EqNode) -> String {
         EqNode::MathFont { kind, content } => format!("(font {:?} {})", kind, sx(content)),
         EqNode::Delimited { left, right, content } => format!("(delim {:?} {:?} {})", left, right, sx(content)),
         EqNode::SizedDelim { delim, size } => format!("(sized {} {:?})", size, delim),
+        EqNode::Middle(d) => format!("(middle {:?})", d),
         EqNode::Matrix { kind, rows: r } => format!("(matrix {:?} {})", kind, rows(r)),
         EqNode::Cases { rows: r } => format!(
             "(cases {})",
@@ -111,7 +112,7 @@ fn collect(node: &EqNode, out: &mut String) {
             out.push_str(right);
             collect(content, out);
         }
-        EqNode::SizedDelim { delim, .. } => out.push_str(delim),
+        EqNode::SizedDelim { delim, .. } | EqNode::Middle(delim) => out.push_str(delim),
         EqNode::Matrix { rows, .. } | EqNode::Align { rows } | EqNode::Array { rows, .. } => {
             rows.iter().flatten().for_each(|n| collect(n, out))
         }
