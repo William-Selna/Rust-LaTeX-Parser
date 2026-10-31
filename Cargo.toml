@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/William-Selna/Rust-LaTeX-Parser"
 keywords = ["latex", "math", "equation", "mathml", "parser"]
 categories = ["parser-implementations", "mathematics"]
+exclude = ["fuzz", ".github"]
 
 [features]
 # Every output format is on by default. For just the parser and tree, use

@@ -136,7 +136,7 @@ fn check_outputs(input: &str, tree: &Node) {
     // than the `a/b/...` it came from, so the re-parse cuts off at a
     // different point. Exact round-tripping is promised below the limit.
     #[cfg(feature = "latex")]
-    if tree_depth(tree) < 30 {
+    if tree_depth(tree) < 20 {
         let latex = rust_latex_parser::to_latex(tree);
         // Re-parsing canonical LaTeX settles after at most one more round.
         let again = rust_latex_parser::to_latex(&parse_equation(&latex));

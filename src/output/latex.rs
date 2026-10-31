@@ -436,8 +436,13 @@ impl Writer {
             return;
         }
         if t.starts_with('\\') && t.len() > 1 {
-            // An unknown command or stray token kept verbatim.
-            self.emit(t);
+            // An unknown command or stray token (`\foo`, a lone `\begin`,
+            // `\right`, `\\`) kept verbatim. Braces keep it from picking up
+            // the next group as an argument or acting as a separator; they
+            // don't change the tree.
+            self.emit("{");
+            self.out.push_str(t);
+            self.out.push('}');
             return;
         }
         for c in t.chars() {
@@ -489,6 +494,11 @@ impl Writer {
     }
 
     fn delimiter(&mut self, d: &str) {
+        // A letter used as a delimiter (`\bigg r`) must not merge into the
+        // command before it.
+        if d.starts_with(|c: char| c.is_ascii_alphabetic()) {
+            self.out.push(' ');
+        }
         match d {
             "" => self.out.push('.'),
             "{" => self.out.push_str("\\{"),
@@ -503,7 +513,14 @@ impl Writer {
                         self.out.push_str(name);
                         self.out.push(' ');
                     }
-                    None => self.out.push_str(d),
+                    None => {
+                        self.out.push_str(d);
+                        // An unknown command delimiter (`\\z`) must not merge
+                        // with a following letter.
+                        if d.starts_with('\\') && d.ends_with(|c: char| c.is_ascii_alphabetic()) {
+                            self.out.push(' ');
+                        }
+                    }
                 }
             }
         }

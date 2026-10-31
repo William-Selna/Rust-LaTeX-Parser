@@ -340,8 +340,8 @@ fn join_parts(parts: Vec<Node>, at: Span) -> Node {
 
 /// A separator text node (`,` or `&`) placed in the gap between two nodes.
 fn between(prev: Option<&Node>, next: Option<&Node>, text: &str) -> Node {
-    let start = prev.map(|n| n.span.end).unwrap_or(0);
-    let end = next.map(|n| n.span.start).unwrap_or(start).max(start);
+    let start = prev.or(next).map_or(0, |n| if prev.is_some() { n.span.end } else { n.span.start });
+    let end = next.map_or(start, |n| n.span.start).max(start);
     Node::new(EqNode::Text(text.to_string()), Span::new(start, end))
 }
 
@@ -490,12 +490,18 @@ fn parse_dimension(s: &str) -> Option<f32> {
 /// point at `{`). Returns the inner text and advances `*i` past the group.
 /// Escaped braces (`\{`, `\}`) don't count towards the nesting.
 fn take_braced(chars: &[char], i: &mut usize) -> String {
+    take_braced_checked(chars, i).0
+}
+
+/// [`take_braced`], also reporting whether the closing brace was found.
+fn take_braced_checked(chars: &[char], i: &mut usize) -> (String, bool) {
     let mut out = String::new();
     if chars.get(*i) != Some(&'{') {
-        return out;
+        return (out, false);
     }
     *i += 1;
     let mut depth = 1;
+    let mut closed = false;
     while let Some(&c) = chars.get(*i) {
         *i += 1;
         match c {
@@ -512,6 +518,7 @@ fn take_braced(chars: &[char], i: &mut usize) -> String {
             '}' => {
                 depth -= 1;
                 if depth == 0 {
+                    closed = true;
                     break;
                 }
             }
@@ -519,7 +526,7 @@ fn take_braced(chars: &[char], i: &mut usize) -> String {
         }
         out.push(c);
     }
-    out
+    (out, closed)
 }
 
 /// Decode the raw argument of `\text{...}`: `\{` and `\}` are literal
@@ -637,6 +644,10 @@ pub struct EqParser {
     in_group: bool,
     /// Inside an environment body: `&`, `\\` and `\end` terminate the current sequence.
     in_env: bool,
+    /// Inside a `\left ... \right` body (but not a `{...}` group within it):
+    /// `\right` terminates the current sequence, even inside an environment
+    /// or `(...)` group opened there.
+    in_left: bool,
     /// Current nesting depth, capped at [`MAX_DEPTH`].
     depth: usize,
 }
@@ -651,6 +662,7 @@ impl EqParser {
             pos: 0,
             in_group: false,
             in_env: false,
+            in_left: false,
             depth: 0,
         }
     }
@@ -760,7 +772,7 @@ impl EqParser {
             Some('&') => self.in_env,
             Some('\\') => {
                 (self.in_env && (self.is_row_separator() || self.lookahead_command("end")))
-                    || (stop_on_right && self.lookahead_command("right"))
+                    || ((stop_on_right || self.in_left) && self.lookahead_command("right"))
             }
             _ => false,
         }
@@ -832,7 +844,7 @@ impl EqParser {
                     let start = self.pos;
                     self.pos += "\\color".len();
                     self.skip_whitespace();
-                    let color = self.parse_brace_arg_opt().unwrap_or_default();
+                    let color = self.parse_closed_brace_arg().unwrap_or_default();
                     self.depth += 1;
                     let rest = self.parse_seq(mode).remove(0);
                     self.depth -= 1;
@@ -894,12 +906,23 @@ impl EqParser {
                 after_space = false;
                 continue;
             }
+            let before = self.pos;
             let atom = self.parse_atom();
             let node = self.parse_postfix(atom);
             push_node(&mut nodes, node);
             glued.push(!after_space);
             nests.push(0);
             after_space = false;
+            if self.pos == before {
+                // Backstop: never loop without consuming input. Keep the
+                // character as text so nothing is lost.
+                let start = self.pos;
+                if let Some(c) = self.advance() {
+                    nodes.push(Node::new(EqNode::Text(c.to_string()), self.span_from(start)));
+                    glued.push(true);
+                    nests.push(0);
+                }
+            }
         }
         parts.push(finish_nodes(nodes, self.here()));
         parts
@@ -1012,11 +1035,12 @@ impl EqParser {
     /// `\\` are literal even when the group sits in an environment cell.
     fn parse_brace_group(&mut self) -> Node {
         self.advance(); // '{'
-        let saved = (self.in_group, self.in_env);
+        let saved = (self.in_group, self.in_env, self.in_left);
         self.in_group = true;
         self.in_env = false;
+        self.in_left = false;
         let inner = self.parse_sequence();
-        (self.in_group, self.in_env) = saved;
+        (self.in_group, self.in_env, self.in_left) = saved;
         if self.peek() == Some('}') {
             self.advance();
         }
@@ -1030,13 +1054,17 @@ impl EqParser {
         while let Some(ch) = self.peek() {
             match ch {
                 ']' => break,
-                '}' if self.in_group => break,
                 '%' => self.skip_comment(),
                 c if c.is_whitespace() => self.skip_whitespace(),
+                _ if self.at_sequence_stop(false) => break,
                 _ => {
+                    let before = self.pos;
                     let atom = self.parse_atom();
                     let node = self.parse_postfix(atom);
                     push_node(&mut nodes, node);
+                    if self.pos == before {
+                        break; // never loop without consuming input
+                    }
                 }
             }
         }
@@ -1268,6 +1296,12 @@ impl EqParser {
     fn parse_atom(&mut self) -> Node {
         self.skip_whitespace_and_comments();
         let start = self.pos;
+        if self.at_sequence_stop(false) {
+            // A command missing its argument (`{\hat}`, `\not&`) gets an
+            // empty one rather than swallowing the `}`, `&`, `\\`, `\end` or
+            // `\right` that ends the surrounding group.
+            return self.leaf(EqNode::Text(String::new()));
+        }
         if self.depth >= MAX_DEPTH {
             // Too deep: keep the input as plain text, one character at a time.
             let kind = match self.advance() {
@@ -1686,7 +1720,7 @@ impl EqParser {
             "begin" => return self.parse_begin_env(start),
             // A stray \end{...} outside any environment: keep it as text.
             "end" => {
-                return match self.parse_brace_arg_opt() {
+                return match self.parse_closed_brace_arg() {
                     Some(env) => EqNode::Text(format!("\\end{{{}}}", env)),
                     None => EqNode::Text("\\end".to_string()),
                 };
@@ -1789,7 +1823,7 @@ impl EqParser {
             // Color. \color as a switch is handled in parse_seq;
             // here it only applies to the following atom.
             "textcolor" | "color" => {
-                let color = self.parse_brace_arg_opt().unwrap_or_default();
+                let color = self.parse_closed_brace_arg().unwrap_or_default();
                 let content = if name == "textcolor" { self.parse_group_atom() } else { self.parse_atom() };
                 return EqNode::Color { color: color.trim().to_string(), content: Box::new(content) };
             }
@@ -1985,10 +2019,11 @@ impl EqParser {
 
         // Parse content until \right. Like braces, \left...\right forms a
         // group, so `&` and `\\` inside it are not environment separators.
-        let saved_env = self.in_env;
+        let saved = (self.in_env, self.in_left);
         self.in_env = false;
+        self.in_left = true;
         let content = self.parse_sequence_until_right(true);
-        self.in_env = saved_env;
+        (self.in_env, self.in_left) = saved;
 
         // Consume \right and its delimiter
         let right_delim = if self.lookahead_command("right") {
@@ -2007,7 +2042,7 @@ impl EqParser {
 
     /// Parse \begin{env_name} ... \end{env_name}.
     fn parse_begin_env(&mut self, start: usize) -> EqNode {
-        let env_name = match self.parse_brace_arg_opt() {
+        let env_name = match self.parse_closed_brace_arg() {
             Some(name) => name.trim().to_string(),
             None => return EqNode::Text("\\begin".to_string()),
         };
@@ -2093,7 +2128,9 @@ impl EqParser {
                         if j > 0 {
                             parts.push(between(parts.last(), Some(&cell), "&"));
                         }
-                        parts.push(cell);
+                        if !matches!(&cell.kind, EqNode::Text(t) if t.is_empty()) {
+                            parts.push(cell);
+                        }
                     }
                 }
                 let end_start = self.pos;
@@ -2114,6 +2151,23 @@ impl EqParser {
         }
         let mut pos = self.pos;
         let s = take_braced(&self.chars, &mut pos);
+        self.pos = pos;
+        Some(s)
+    }
+
+    /// Like [`Self::parse_brace_arg_opt`], but only accepts a group whose
+    /// closing brace is present; otherwise nothing is consumed. Used for
+    /// names (environments) that are echoed back as text, where an
+    /// unclosed brace would leave the output unbalanced.
+    fn parse_closed_brace_arg(&mut self) -> Option<String> {
+        if self.peek() != Some('{') {
+            return None;
+        }
+        let mut pos = self.pos;
+        let (s, closed) = take_braced_checked(&self.chars, &mut pos);
+        if !closed {
+            return None;
+        }
         self.pos = pos;
         Some(s)
     }
@@ -2181,7 +2235,8 @@ impl EqParser {
                 self.skip_whitespace_and_comments();
                 let at_end = self.peek().is_none()
                     || self.lookahead_command("end")
-                    || (self.in_group && self.peek() == Some('}'));
+                    || (self.in_group && self.peek() == Some('}'))
+                    || (self.in_left && self.lookahead_command("right"));
                 if at_end {
                     break;
                 }
@@ -2204,7 +2259,7 @@ impl EqParser {
         let save = self.pos;
         self.pos += "\\end".len();
         self.skip_whitespace();
-        match self.parse_brace_arg_opt() {
+        match self.parse_closed_brace_arg() {
             Some(name) if name.trim() == expected => true,
             _ => {
                 self.pos = save;
