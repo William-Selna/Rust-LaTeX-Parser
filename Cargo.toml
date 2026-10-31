@@ -1,11 +1,28 @@
 [package]
 name = "rust-latex-parser"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
-description = "A LaTeX equation parser that produces an abstract syntax tree. Supports fractions, roots, matrices, big operators, Greek letters, accents, and 270+ Unicode symbols — with convenient bareword syntax."
+description = "Math input for equation editors: parses LaTeX or plain notation (sqrt(x)/2 <= abs(y)) into an AST with source spans and writes LaTeX, MathML, SVG or Unicode. Never fails or crashes on half-typed input. No dependencies."
 license = "MIT"
 repository = "https://github.com/William-Selna/Rust-LaTeX-Parser"
-keywords = ["latex", "math", "equation", "parser", "ast"]
+keywords = ["latex", "math", "equation", "mathml", "parser"]
 categories = ["parser-implementations", "mathematics"]
+exclude = ["fuzz", ".github"]
+
+[features]
+# Every output format is on by default. For just the parser and tree, use
+# `default-features = false` and enable only the formats you need.
+default = ["latex", "mathml", "unicode", "svg"]
+# `to_latex`: canonical LaTeX.
+latex = []
+# `to_mathml`: MathML Core for native browser rendering.
+mathml = []
+# `to_unicode`: plain text like `x² + √y`.
+unicode = []
+# `to_svg`: standalone SVG images (uses `unicode` for the accessible title).
+svg = ["unicode"]
 
 [dependencies]
+
+[package.metadata.docs.rs]
+all-features = true
