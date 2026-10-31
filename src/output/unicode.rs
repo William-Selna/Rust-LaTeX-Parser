@@ -1,6 +1,6 @@
 //! Serialize a tree to plain Unicode text.
 
-use super::style::styled_str;
+use crate::style::styled_str;
 use crate::ast::*;
 
 /// Convert a tree to readable plain text, like `x² + √(y + 1)`.

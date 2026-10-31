@@ -9,9 +9,9 @@
 //! All internal lengths are in ems with y pointing *up* from the baseline;
 //! they are converted to pixels when the SVG is written.
 
-use super::mathml::MathDisplay;
-use super::style::styled_char;
 use super::unicode::to_unicode;
+use super::MathDisplay;
+use crate::style::styled_char;
 use crate::ast::*;
 
 /// Options for [`to_svg`].

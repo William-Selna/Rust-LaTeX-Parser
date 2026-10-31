@@ -1,5 +1,8 @@
 //! Mathematical alphanumeric characters (𝐱, ℝ, 𝔉, ...) for math fonts.
 
+// The forward mapping is only needed by the output formats.
+#![cfg_attr(not(any(feature = "mathml", feature = "unicode", feature = "svg")), allow(dead_code))]
+
 use crate::ast::MathFontKind;
 
 /// The styled form of an ASCII letter or digit, e.g. `R` in

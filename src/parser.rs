@@ -23,7 +23,7 @@
 
 use crate::ast::*;
 pub use crate::symbols::latex_to_unicode;
-use crate::output::unstyle_char;
+use crate::style::unstyle_char;
 use crate::symbols::op_kind;
 
 /// Width of `\quad` (1em). Other units are scaled relative to this.
@@ -119,6 +119,7 @@ fn push_node(nodes: &mut Vec<Node>, mut node: Node) {
 /// Whether a run of letters ending in `word` would be read as a bareword
 /// shortcut (`pi`, `sin`, `sqrt`, ...) rather than separate letters. Used by
 /// the LaTeX writer to decide where letters need a separating space.
+#[cfg_attr(not(feature = "latex"), allow(dead_code))]
 pub(crate) fn is_bareword(word: &str) -> bool {
     word == "sqrt"
         || BIG_OP_COMMANDS.contains(&word)
@@ -127,6 +128,7 @@ pub(crate) fn is_bareword(word: &str) -> bool {
 }
 
 /// Whether `word` followed by `(` is a function-style shortcut like `abs(`.
+#[cfg_attr(not(feature = "latex"), allow(dead_code))]
 pub(crate) fn is_function_word(word: &str) -> bool {
     FUNCTION_WORDS.contains(&word)
 }

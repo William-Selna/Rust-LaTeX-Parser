@@ -8,4 +8,20 @@ repository = "https://github.com/William-Selna/Rust-LaTeX-Parser"
 keywords = ["latex", "math", "equation", "mathml", "parser"]
 categories = ["parser-implementations", "mathematics"]
 
+[features]
+# Every output format is on by default. For just the parser and tree, use
+# `default-features = false` and enable only the formats you need.
+default = ["latex", "mathml", "unicode", "svg"]
+# `to_latex`: canonical LaTeX.
+latex = []
+# `to_mathml`: MathML Core for native browser rendering.
+mathml = []
+# `to_unicode`: plain text like `x² + √y`.
+unicode = []
+# `to_svg`: standalone SVG images (uses `unicode` for the accessible title).
+svg = ["unicode"]
+
 [dependencies]
+
+[package.metadata.docs.rs]
+all-features = true

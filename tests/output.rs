@@ -1,4 +1,5 @@
 //! Output formats: LaTeX, MathML, Unicode.
+#![cfg(all(feature = "latex", feature = "mathml", feature = "unicode"))]
 
 mod common;
 

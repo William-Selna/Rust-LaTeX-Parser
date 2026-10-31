@@ -1,17 +1,8 @@
 //! Serialize a tree to MathML.
 
-use super::style::styled_str;
+pub use super::MathDisplay;
 use crate::ast::*;
-
-/// Whether MathML output is a display (block) equation or inline in text.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum MathDisplay {
-    /// Inline with surrounding text: big-operator limits go to the side.
-    #[default]
-    Inline,
-    /// A display equation on its own line: limits go above and below.
-    Block,
-}
+use crate::style::styled_str;
 
 /// Convert a tree to a MathML `<math>` element.
 ///

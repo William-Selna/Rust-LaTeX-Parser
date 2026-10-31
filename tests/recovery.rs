@@ -243,8 +243,14 @@ fn extremely_deep_input_does_not_overflow_the_stack() {
     // Test threads have a 2 MB stack.
     for input in inputs {
         let node = parse_equation(&input);
+        #[cfg(feature = "latex")]
         let _ = rust_latex_parser::to_latex(&node);
+        #[cfg(feature = "mathml")]
         let _ = rust_latex_parser::to_mathml(&node, rust_latex_parser::MathDisplay::Block);
+        #[cfg(feature = "unicode")]
         let _ = rust_latex_parser::to_unicode(&node);
+        #[cfg(feature = "svg")]
+        let _ = rust_latex_parser::to_svg(&node, &rust_latex_parser::SvgOptions::default());
+        let _ = node;
     }
 }

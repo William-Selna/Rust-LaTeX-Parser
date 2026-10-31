@@ -1,4 +1,5 @@
 //! SVG output.
+#![cfg(feature = "svg")]
 
 use rust_latex_parser::{parse_equation, to_svg, MathDisplay, SvgOptions};
 

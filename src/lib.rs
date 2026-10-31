@@ -11,19 +11,44 @@
 //! # Quick start
 //!
 //! ```
-//! use rust_latex_parser::{parse_equation, to_latex, to_mathml, to_unicode, EqNode, MathDisplay};
+//! use rust_latex_parser::{parse_equation, EqNode};
+//!
+//! let tree = parse_equation("x = (-b +/- sqrt(b^2 - 4ac))/(2a)");
+//!
+//! // Walk the tree. Every node knows where it came from.
+//! let EqNode::Seq(parts) = &tree.kind else { unreachable!() };
+//! assert!(matches!(parts[2].kind, EqNode::Frac(..)));
+//! assert_eq!(parts[2].span.range(), 4..33); // "(-b +/- sqrt(b^2 - 4ac))/(2a)"
+//! ```
+//!
+//! Or write it out in another format (each is a cargo feature, all on by
+//! default):
+//!
+//! ```
+//! # #[cfg(all(feature = "latex", feature = "mathml", feature = "unicode", feature = "svg"))] {
+//! use rust_latex_parser::*;
 //!
 //! let tree = parse_equation("x = (-b +/- sqrt(b^2 - 4ac))/(2a)");
 //!
 //! assert_eq!(to_latex(&tree), r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}");
 //! assert_eq!(to_unicode(&tree), "x = (-b ± √(b² - 4ac))/2a");
 //! assert!(to_mathml(&tree, MathDisplay::Block).starts_with("<math"));
-//!
-//! // Or walk the tree yourself. Every node knows where it came from.
-//! let EqNode::Seq(parts) = &tree.kind else { unreachable!() };
-//! assert!(matches!(parts[2].kind, EqNode::Frac(..)));
-//! assert_eq!(parts[2].span.range(), 4..33); // "(-b +/- sqrt(b^2 - 4ac))/(2a)"
+//! assert!(to_svg(&tree, &SvgOptions::default()).starts_with("<svg"));
+//! # }
 //! ```
+//!
+//! # Cargo features
+//!
+//! | Feature | Adds |
+//! |---------|------|
+//! | `latex` | `to_latex` |
+//! | `mathml` | `to_mathml`, `MathDisplay` |
+//! | `unicode` | `to_unicode` |
+//! | `svg` | `to_svg`, `SvgOptions`, `SvgFont` (also enables `unicode`) |
+//!
+//! All are on by default. The parser, the tree, source spans and the symbol
+//! lookups are always available; for just those, use
+//! `default-features = false`.
 //!
 //! # Plain notation
 //!
@@ -81,19 +106,29 @@
 //!
 //! # Output
 //!
-//! See the [`output`] module: [`to_latex`] for canonical LaTeX,
-//! [`to_mathml`] for native browser rendering, [`to_svg`] for images, and
-//! [`to_unicode`] for plain text.
+//! See the [`output`] module: `to_latex` for canonical LaTeX, `to_mathml`
+//! for native browser rendering, `to_svg` for images, and `to_unicode` for
+//! plain text.
 
 pub mod ast;
 pub mod output;
 pub mod parser;
+mod style;
 mod symbols;
 
 pub use ast::{
     AccentKind, ArrayColumn, EncloseKind, EqMetrics, EqNode, MathFontKind, MatrixKind, Node,
     OpKind, Span,
 };
-pub use output::{to_latex, to_mathml, to_svg, to_unicode, MathDisplay, SvgOptions};
+#[cfg(feature = "latex")]
+pub use output::to_latex;
+#[cfg(feature = "mathml")]
+pub use output::to_mathml;
+#[cfg(any(feature = "mathml", feature = "svg"))]
+pub use output::MathDisplay;
+#[cfg(feature = "svg")]
+pub use output::{to_svg, SvgOptions};
+#[cfg(feature = "unicode")]
+pub use output::to_unicode;
 pub use parser::parse_equation;
 pub use symbols::{latex_to_unicode, op_kind, symbols, unicode_to_latex};
