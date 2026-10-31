@@ -33,7 +33,11 @@
 /// let tree = parse_equation("\\frac{\\frac{a}{b}}{c}");
 /// assert_eq!(count_fractions(&tree), 2);
 /// ```
-#[derive(Debug, Clone)]
+///
+/// The enum is `#[non_exhaustive]`: new LaTeX constructs may add variants in
+/// future releases, so include a wildcard arm when matching.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum EqNode {
     /// Plain text — a variable name, number, operator character, or Unicode symbol.
     ///
@@ -79,6 +83,12 @@ pub enum EqNode {
     /// Produced by `\sqrt{x}` or the bareword `sqrt(x)`.
     Sqrt(Box<EqNode>),
 
+    /// Root with an explicit index, e.g. a cube root.
+    ///
+    /// Produced by `\sqrt[3]{x}` or the bareword `sqrt[3](x)`. An empty
+    /// index (`\sqrt[]{x}`) produces a plain [`EqNode::Sqrt`] instead.
+    Root { index: Box<EqNode>, content: Box<EqNode> },
+
     /// Big operator — summation, integral, product, etc. — with optional
     /// upper and lower limits.
     ///
@@ -90,10 +100,10 @@ pub enum EqNode {
         upper: Option<Box<EqNode>>,
     },
 
-    /// An accent mark above a node.
+    /// An accent mark above (or, for [`AccentKind::Underline`], below) a node.
     ///
-    /// Produced by `\hat{x}`, `\bar{x}`, `\dot{x}`, `\ddot{x}`, `\tilde{x}`,
-    /// or `\vec{v}`. See [`AccentKind`] for the variants.
+    /// Produced by `\hat{x}`, `\bar{x}`, `\vec{v}`, `\widehat{xy}`,
+    /// `\underline{x}`, and friends. See [`AccentKind`] for the variants.
     Accent(Box<EqNode>, AccentKind),
 
     /// A named limit-style operator (`lim`, `sin`, `log`, etc.) with an
@@ -101,8 +111,7 @@ pub enum EqNode {
     ///
     /// These render as upright text (not italic), with the limit below when
     /// present. Produced by `\lim_{x \to 0}`, barewords like `sin`, `cos`,
-    /// and custom operators via `\operatorname{rank}`. `\bmod` and `\pmod`
-    /// also use a `Limit` named `"mod"`.
+    /// and custom operators via `\operatorname{rank}`.
     Limit {
         name: String,
         lower: Option<Box<EqNode>>,
@@ -116,10 +125,10 @@ pub enum EqNode {
 
     /// Math font override for a subexpression.
     ///
-    /// Produced by `\mathbb{R}`, `\mathbf{v}`, `\mathcal{F}`, etc. Styled
-    /// text commands (`\textbf`, `\textsf`, `\texttt`) produce a `MathFont`
-    /// wrapping a [`EqNode::TextBlock`].
-    /// See [`MathFontKind`] for the supported font families.
+    /// Produced by `\mathbb{R}`, `\mathbf{v}`, `\mathcal{F}`, `\boldsymbol{x}`,
+    /// etc. Styled text commands like `\textbf{...}` produce a `MathFont`
+    /// wrapping a [`EqNode::TextBlock`]. See [`MathFontKind`] for the font
+    /// families.
     MathFont { kind: MathFontKind, content: Box<EqNode> },
 
     /// Content wrapped in stretchy delimiters.
@@ -131,6 +140,14 @@ pub enum EqNode {
     /// produces an empty string.
     Delimited { left: String, right: String, content: Box<EqNode> },
 
+    /// A manually sized delimiter.
+    ///
+    /// Produced by `\big(`, `\Big[`, `\bigg\{`, `\Bigg|` and their
+    /// `l`/`r`/`m` forms (`\bigl(`, `\bigr)`, ...). `size` runs from 1
+    /// (`\big`) to 4 (`\Bigg`). `delim` is converted the same way as in
+    /// [`EqNode::Delimited`].
+    SizedDelim { delim: String, size: u8 },
+
     /// Matrix or matrix-like environment.
     ///
     /// Produced by `\begin{pmatrix}`, `\begin{bmatrix}`, `\begin{smallmatrix}`, etc.
@@ -141,9 +158,34 @@ pub enum EqNode {
     /// Piecewise / cases environment.
     ///
     /// Produced by `\begin{cases} ... \end{cases}` (or `dcases`). Each row
-    /// is a `(value, optional_condition)` pair. The condition comes after `&`;
-    /// any further `&`-separated cells are kept in the condition.
+    /// is a `(value, optional_condition)` pair. The condition comes after `&`.
     Cases { rows: Vec<(EqNode, Option<EqNode>)> },
+
+    /// Multi-line equations aligned at `&` markers.
+    ///
+    /// Produced by `align`, `align*`, `aligned`, `split`, `alignat`,
+    /// `alignedat`, `flalign` and `eqnarray`. Each row is split into cells
+    /// at `&`. Following amsmath, odd-numbered columns (1st, 3rd, ...) are
+    /// right-aligned and even-numbered columns are left-aligned.
+    Align { rows: Vec<Vec<EqNode>> },
+
+    /// Multi-line equations, each line centered.
+    ///
+    /// Produced by `gather`, `gather*` and `gathered`, and by `equation`
+    /// when its body contains `\\`.
+    Gather { rows: Vec<EqNode> },
+
+    /// A general array with per-column alignment.
+    ///
+    /// Produced by `\begin{array}{c|cc} ... \end{array}`, `subarray`, and
+    /// `\substack{...}`. `columns` is the parsed column spec. `hlines` lists
+    /// where `\hline` rules appear: a value of `i` means a rule above row `i`
+    /// (and `rows.len()` means below the last row).
+    Array {
+        columns: Vec<ArrayColumn>,
+        rows: Vec<Vec<EqNode>>,
+        hlines: Vec<usize>,
+    },
 
     /// Binomial coefficient. Rendered as a stacked pair in parentheses.
     ///
@@ -159,14 +201,33 @@ pub enum EqNode {
     /// One expression stacked above or below another.
     ///
     /// Produced by `\overset{def}{=}` (over=true), `\underset{lim}{=}`
-    /// (over=false), or `\stackrel{above}{base}` (over=true). Extensible
-    /// arrows like `\xrightarrow[below]{above}` are built from nested
-    /// `StackRel` nodes around the arrow symbol.
+    /// (over=false), or `\stackrel{above}{base}` (over=true).
+    ///
+    /// Extensible arrows like `\xrightarrow[below]{above}` are also built
+    /// from nested `StackRel` nodes around the arrow symbol.
     StackRel { base: Box<EqNode>, annotation: Box<EqNode>, over: bool },
+
+    /// Colored subexpression.
+    ///
+    /// Produced by `\textcolor{red}{x}` (colors just the argument) or
+    /// `\color{red}` (a switch that colors everything after it in the
+    /// current group, like in LaTeX). `color` is the raw color spec, e.g.
+    /// `"red"` or `"#ff0000"`.
+    Color { color: String, content: Box<EqNode> },
+
+    /// Content with a box or strike-through drawn over it.
+    ///
+    /// Produced by `\boxed{x}`, `\fbox{text}`, `\cancel{x}`, `\bcancel{x}`
+    /// and `\xcancel{x}`. See [`EncloseKind`].
+    Enclose { kind: EncloseKind, content: Box<EqNode> },
 }
 
 /// The kind of accent mark in an [`EqNode::Accent`] node.
-#[derive(Debug, Clone, Copy)]
+///
+/// Wide variants (`\widehat`, `\widetilde`, `\overrightarrow`) map to the
+/// same kind as their narrow counterparts; stretch them to the content width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum AccentKind {
     /// `\hat{x}` or `\widehat{xy}` — circumflex above.
     Hat,
@@ -176,14 +237,33 @@ pub enum AccentKind {
     Dot,
     /// `\ddot{x}` — double dot (diaeresis) above.
     DoubleDot,
+    /// `\dddot{x}` — triple dot above.
+    TripleDot,
     /// `\tilde{x}` or `\widetilde{xy}` — tilde above.
     Tilde,
     /// `\vec{v}` or `\overrightarrow{AB}` — right arrow above.
     Vec,
+    /// `\overleftarrow{AB}` — left arrow above.
+    LeftArrow,
+    /// `\overleftrightarrow{AB}` — double-headed arrow above.
+    LeftRightArrow,
+    /// `\acute{x}` — acute accent above.
+    Acute,
+    /// `\grave{x}` — grave accent above.
+    Grave,
+    /// `\breve{x}` — breve above.
+    Breve,
+    /// `\check{x}` or `\widecheck{x}` — caron above.
+    Check,
+    /// `\mathring{x}` — ring above.
+    Ring,
+    /// `\underline{x}` — horizontal line *below* the content.
+    Underline,
 }
 
 /// The font family in a [`EqNode::MathFont`] node.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum MathFontKind {
     /// `\mathbf{...}` or `\textbf{...}` — bold.
     Bold,
@@ -193,6 +273,11 @@ pub enum MathFontKind {
     Calligraphic,
     /// `\mathrm{...}` — upright roman.
     Roman,
+    /// `\mathit{...}` or `\textit{...}` — italic.
+    Italic,
+    /// `\boldsymbol{...}` or `\bm{...}` — bold italic for letters, bold for
+    /// symbols.
+    BoldItalic,
     /// `\mathfrak{...}` — Fraktur / blackletter.
     Fraktur,
     /// `\mathsf{...}` or `\textsf{...}` — sans-serif.
@@ -202,7 +287,8 @@ pub enum MathFontKind {
 }
 
 /// The delimiter style for a [`EqNode::Matrix`] node.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum MatrixKind {
     /// `\begin{matrix}` or `\begin{smallmatrix}` — no delimiters.
     Plain,
@@ -216,6 +302,37 @@ pub enum MatrixKind {
     DoubleVBar,
     /// `\begin{Bmatrix}` — curly braces `{ }`.
     Brace,
+}
+
+/// The decoration in an [`EqNode::Enclose`] node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum EncloseKind {
+    /// `\boxed{...}` or `\fbox{...}` — a frame around the content.
+    Box,
+    /// `\cancel{...}` — a diagonal strike from bottom-left to top-right.
+    Cancel,
+    /// `\bcancel{...}` — a diagonal strike from top-left to bottom-right.
+    BackCancel,
+    /// `\xcancel{...}` — both diagonal strikes (an X).
+    XCancel,
+}
+
+/// One entry in an [`EqNode::Array`] column spec.
+///
+/// `p{width}`, `m{width}` and `b{width}` columns become [`ArrayColumn::Left`];
+/// `@{...}` and `!{...}` inserts are skipped; `*{n}{spec}` is expanded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ArrayColumn {
+    /// `l` — left-aligned column.
+    Left,
+    /// `c` — centered column.
+    Center,
+    /// `r` — right-aligned column.
+    Right,
+    /// `|` — a vertical rule between columns (not a column itself).
+    VLine,
 }
 
 /// Measured dimensions of a laid-out equation node.
@@ -235,7 +352,7 @@ pub enum MatrixKind {
 ///  ├─────────────┤
 ///       width
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EqMetrics {
     /// Horizontal extent of the node.
     pub width: f32,

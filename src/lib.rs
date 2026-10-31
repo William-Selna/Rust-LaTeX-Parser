@@ -33,18 +33,22 @@
 //! |----------|---------|
 //! | Superscripts / subscripts | `x^2`, `x_{i+1}`, `x^2_3` |
 //! | Fractions | `a/b`, `\frac{a}{b}`, `\dfrac{a}{b}`, `{a \over b}` |
-//! | Square roots | `sqrt(x)`, `\sqrt{x}` |
+//! | Roots | `sqrt(x)`, `\sqrt{x}`, `\sqrt[3]{x}` |
+//! | Primes | `f'(x)`, `f''` |
 //! | Greek letters | `pi`, `\alpha`, `\Omega` |
-//! | Big operators | `\sum_{i=0}^{n}`, `int_0^1`, `\prod`, `\bigcup`, `\sum\limits_{i}` |
+//! | Big operators | `\sum_{i=0}^{n}`, `int_0^1`, `\prod`, `\bigcup`, `\sum\limits_{\substack{i \\\\ j}}` |
 //! | Limit operators | `lim_{x \to 0}`, `sin`, `log_2`, `\operatorname{rank}` |
-//! | Accents | `\hat{x}`, `\bar{x}`, `\vec{v}`, `\widehat{xy}` |
+//! | Accents | `\hat{x}`, `\bar{x}`, `\vec{v}`, `\widehat{xy}`, `\underline{x}` |
 //! | Matrices | `\begin{pmatrix} a & b \\\\ c & d \end{pmatrix}` |
 //! | Cases | `\begin{cases} x & x>0 \\\\ 0 & x=0 \end{cases}` |
-//! | Delimiters | `\left( ... \right)`, `\left\{ ... \middle\| ... \right\}` |
-//! | Math fonts | `\mathbb{R}`, `\mathcal{F}`, `\mathbf{v}`, `\textbf{...}` |
+//! | Aligned equations | `\begin{align} a &= b \\\\ &= c \end{align}`, `gather`, `split` |
+//! | Arrays | `\begin{array}{c\|c} \hline a & b \end{array}` |
+//! | Delimiters | `\left\{ ... \middle\| ... \right\}`, `\bigl( ... \bigr)` |
+//! | Math fonts | `\mathbb{R}`, `\mathcal{F}`, `\mathbf{v}`, `\boldsymbol{x}`, `\textbf{...}` |
 //! | Binomials | `\binom{n}{k}`, `{n \choose k}` |
 //! | Braces | `\overbrace{a+b}^{n}`, `\underbrace{...}_{text}` |
 //! | Stacked | `\overset{def}{=}`, `\underset{lim}{=}`, `\xrightarrow[a]{b}` |
+//! | Decorations | `\boxed{x}`, `\cancel{x}`, `\textcolor{red}{x}`, `\color{red}` |
 //! | Negation | `\not\in`, `\not=` |
 //! | Spacing | `\,`, `\quad`, `\hspace{1em}`, `\mkern3mu` |
 //! | 270+ symbols | `\pm`, `\leq`, `\in`, `\rightarrow`, `\infty`, `\mid`, ... |
@@ -57,11 +61,12 @@
 //! continues after them. This is intentional — it keeps live-preview editors
 //! responsive while the user is still typing.
 //!
-//! The only things discarded are presentational commands with no visible
-//! output, like `\displaystyle`, `\limits` and `\label{...}`.
+//! The only things discarded are those LaTeX itself treats as invisible:
+//! `%` comments and presentational commands like `\displaystyle`,
+//! `\limits` and `\label{...}`.
 
 pub mod ast;
 pub mod parser;
 
-pub use ast::{AccentKind, EqMetrics, EqNode, MathFontKind, MatrixKind};
+pub use ast::{AccentKind, ArrayColumn, EncloseKind, EqMetrics, EqNode, MathFontKind, MatrixKind};
 pub use parser::{latex_to_unicode, parse_equation};
