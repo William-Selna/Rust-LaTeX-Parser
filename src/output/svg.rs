@@ -1,7 +1,7 @@
 //! Render a tree to SVG with a small TeX-style box layout engine.
 //!
-//! Glyph widths come from built-in Times-like metrics (STIX Two, Cambria
-//! and Times New Roman are all close), so no font files are needed.
+//! Glyph widths come from built-in metric tables for a choice of fonts
+//! (see [`SvgFont`]), so no font files are needed at render time.
 //! Anything that has to stretch or scale — brackets, radicals, fraction
 //! bars, big operators, accents, braces — is drawn as vector paths, so it
 //! looks right whichever font the viewer ends up using for the letters.
@@ -9,6 +9,7 @@
 //! All internal lengths are in ems with y pointing *up* from the baseline;
 //! they are converted to pixels when the SVG is written.
 
+use super::svg_fonts::{self, FontMetrics};
 use super::unicode::to_unicode;
 use super::MathDisplay;
 use crate::style::styled_char;
@@ -24,10 +25,15 @@ pub struct SvgOptions {
     /// Fill and stroke color. Default `currentColor`, so the equation
     /// takes the surrounding text color when embedded in HTML.
     pub color: String,
-    /// CSS font family for letters and symbols. The layout uses Times
-    /// metrics, so a Times-compatible font (Times New Roman, Liberation
-    /// Serif, Nimbus Roman) gives the most accurate spacing.
-    pub font_family: String,
+    /// The font the layout is measured for. The SVG names this font, so it
+    /// should be available to whatever displays the SVG (installed, or
+    /// loaded as a web font) for the spacing to come out exactly right.
+    /// Default [`SvgFont::Times`], which every platform has.
+    pub font: SvgFont,
+    /// Override the CSS `font-family` written into the SVG. By default it's
+    /// [`SvgFont::css_family`] for `font`. The layout still uses `font`'s
+    /// widths.
+    pub font_family: Option<String>,
     /// Add `data-span="start-end"` (byte offsets into the input) to every
     /// glyph, so an editor can map clicks back to the source.
     pub span_attributes: bool,
@@ -39,8 +45,60 @@ impl Default for SvgOptions {
             font_size: 20.0,
             display: MathDisplay::Inline,
             color: "currentColor".to_string(),
-            font_family: "'Times New Roman',Times,'Liberation Serif','Nimbus Roman',serif".to_string(),
+            font: SvgFont::Times,
+            font_family: None,
             span_attributes: false,
+        }
+    }
+}
+
+/// A font the SVG layout has width tables for.
+///
+/// The layout needs to know how wide each glyph is to place things; these
+/// tables were measured from each font. Pick the one your page or app
+/// displays the SVG with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum SvgFont {
+    /// Times New Roman, or a metric-compatible clone (Liberation Serif,
+    /// Nimbus Roman, TeX Gyre Termes). Available almost everywhere.
+    #[default]
+    Times,
+    /// STIX Two Text: a Times-like design made for scientific publishing.
+    StixTwo,
+    /// Computer Modern (the CMU Serif or Latin Modern Roman fonts): the
+    /// classic LaTeX look.
+    ComputerModern,
+    /// Noto Serif: the default serif on Android and many Linux systems.
+    NotoSerif,
+    /// DejaVu Serif: a common Linux default.
+    DejaVuSerif,
+    /// Libertinus Serif: popular in academic publishing.
+    Libertinus,
+}
+
+impl SvgFont {
+    /// The CSS `font-family` value written into the SVG for this font,
+    /// with sensible fallbacks.
+    pub fn css_family(&self) -> &'static str {
+        match self {
+            SvgFont::Times => "'Times New Roman',Times,'Liberation Serif','Nimbus Roman',serif",
+            SvgFont::StixTwo => "'STIX Two Text','STIX Two Math',serif",
+            SvgFont::ComputerModern => "'CMU Serif','Latin Modern Roman','Computer Modern',serif",
+            SvgFont::NotoSerif => "'Noto Serif',serif",
+            SvgFont::DejaVuSerif => "'DejaVu Serif',serif",
+            SvgFont::Libertinus => "'Libertinus Serif','Linux Libertine',serif",
+        }
+    }
+
+    fn metrics(&self) -> &'static FontMetrics {
+        match self {
+            SvgFont::Times => &svg_fonts::TIMES,
+            SvgFont::StixTwo => &svg_fonts::STIX_TWO,
+            SvgFont::ComputerModern => &svg_fonts::COMPUTER_MODERN,
+            SvgFont::NotoSerif => &svg_fonts::NOTO_SERIF,
+            SvgFont::DejaVuSerif => &svg_fonts::DEJAVU_SERIF,
+            SvgFont::Libertinus => &svg_fonts::LIBERTINUS,
         }
     }
 }
@@ -67,7 +125,7 @@ pub fn to_svg(node: &Node, options: &SvgOptions) -> String {
         color: None,
         middle_owner: 0,
     };
-    let mut engine = Engine { next_owner: 1 };
+    let mut engine = Engine { next_owner: 1, metrics: options.font.metrics() };
     let mut b = engine.layout(node, &style);
     engine.resolve_stray_middles(&mut b, &style);
     let fs = options.font_size;
@@ -88,13 +146,19 @@ pub fn to_svg(node: &Node, options: &SvgOptions) -> String {
     out.push_str(&format!(
         "<g fill=\"{c}\" stroke=\"{c}\" stroke-width=\"0\" font-family=\"{f}\">",
         c = escape(&options.color),
-        f = escape(&options.font_family)
+        f = escape(options.font_family.as_deref().unwrap_or(options.font.css_family()))
     ));
     for item in &b.items {
         match item {
             Item::Glyph { x, y, chars, scale, italic, bold, family, color, span, error } => {
-                let xs: Vec<String> = chars.iter().map(|(_, dx)| px(x + dx)).collect();
-                let text: String = chars.iter().map(|(c, _)| *c).collect();
+                // Spaces are left out: SVG would collapse them and shift the
+                // explicit positions; their width is already in the layout.
+                let visible: Vec<&(char, f32)> = chars.iter().filter(|(c, _)| !c.is_whitespace()).collect();
+                if visible.is_empty() {
+                    continue;
+                }
+                let xs: Vec<String> = visible.iter().map(|(_, dx)| px(x + dx)).collect();
+                let text: String = visible.iter().map(|(c, _)| *c).collect();
                 let mut attrs = format!("x=\"{}\" y=\"{}\" font-size=\"{}\"", xs.join(" "), py(*y), fmt(scale * fs));
                 if *italic {
                     attrs.push_str(" font-style=\"italic\"");
@@ -312,74 +376,28 @@ impl LBox {
 
 // ─── Glyph metrics ──────────────────────────────────────────────────
 
-/// Advance widths (in ems) from the Adobe Times AFM metrics.
-fn ascii_width(c: char, italic: bool) -> f32 {
-    let w = if italic {
-        match c {
-            'A' | 'B' | 'E' | 'F' | 'P' | 'R' | 'V' | 'X' => 611,
-            'C' => 667,
-            'D' | 'G' | 'H' | 'O' | 'Q' | 'U' => 722,
-            'I' => 333,
-            'J' => 444,
-            'K' => 667,
-            'L' | 'T' | 'Y' | 'Z' => 556,
-            'M' | 'W' => 833,
-            'N' => 667,
-            'S' => 500,
-            'a' | 'b' | 'd' | 'g' | 'h' | 'n' | 'o' | 'p' | 'q' | 'u' => 500,
-            'c' | 'e' | 'k' | 'v' | 'x' | 'y' => 444,
-            'f' | 'i' | 'j' | 'l' | 't' => 278,
-            'm' => 722,
-            'r' | 's' | 'z' => 389,
-            'w' => 667,
-            _ => return ascii_width(c, false),
-        }
-    } else {
-        match c {
-            ' ' => 250,
-            '!' | '\'' | '(' | ')' | '-' | '[' | ']' | '`' | 'I' | 'f' | 'r' => 333,
-            '"' => 408,
-            '#' | '$' | '*' | '0'..='9' | '_' | 'b' | 'd' | 'g' | 'h' | 'k' | 'n' | 'o' | 'p' | 'q' | 'u'
-            | 'v' | 'x' | 'y' => 500,
-            '%' => 833,
-            '&' => 778,
-            '+' | '<' | '=' | '>' => 564,
-            ',' | '.' => 250,
-            '/' | ':' | ';' | '\\' | 'i' | 'j' | 'l' | 't' => 278,
-            '?' | 'a' | 'c' | 'e' | 'z' => 444,
-            '@' => 921,
-            'A' | 'D' | 'G' | 'H' | 'K' | 'N' | 'O' | 'Q' | 'U' | 'V' | 'X' | 'Y' => 722,
-            'B' | 'C' | 'R' => 667,
-            'E' | 'L' | 'T' | 'Z' => 611,
-            'F' | 'P' | 'S' => 556,
-            'J' => 389,
-            'M' => 889,
-            'W' => 944,
-            '^' => 469,
-            'm' => 778,
-            's' => 389,
-            'w' => 722,
-            '{' | '}' => 480,
-            '|' => 200,
-            '~' => 541,
-            _ => 500,
-        }
+/// The advance width of a character in ems: from the font's table when it
+/// has the glyph, otherwise a generic estimate (the viewer will fall back to
+/// another font for it anyway).
+fn char_width(metrics: &FontMetrics, c: char, italic: bool, math: bool) -> f32 {
+    let base = metrics
+        .width(c, italic)
+        .or_else(|| metrics.width(c, !italic))
+        .unwrap_or_else(|| fallback_width(c));
+    // Math italic letters are a little wider than text italic, and a few
+    // overhang to the right (TeX's italic correction).
+    let extra = match c {
+        _ if !math || !italic => 0.0,
+        'f' => 0.14,
+        'j' | 'V' | 'W' | 'Y' | 'T' | 'F' | 'P' => 0.08,
+        _ if c.is_ascii_alphabetic() => 0.04,
+        _ => 0.0,
     };
-    w as f32 / 1000.0
+    base + extra
 }
 
-fn char_width(c: char, italic: bool) -> f32 {
-    if c.is_ascii() {
-        // Math italic letters are a little wider than text italic, and a
-        // few overhang to the right (TeX's italic correction).
-        let extra = match c {
-            'f' if italic => 0.14,
-            'j' | 'V' | 'W' | 'Y' | 'T' | 'F' | 'P' if italic => 0.08,
-            _ if italic && c.is_ascii_alphabetic() => 0.04,
-            _ => 0.0,
-        };
-        return ascii_width(c, italic) + extra;
-    }
+/// Width estimate for glyphs a font's table doesn't cover.
+fn fallback_width(c: char) -> f32 {
     match c {
         'α'..='ω' => 0.55,
         'Α'..='Ω' => 0.68,
@@ -398,6 +416,7 @@ fn char_width(c: char, italic: bool) -> f32 {
         '\u{2100}'..='\u{214F}' => 0.72,
         _ if (c as u32) >= 0x2E80 => 1.0,
         _ if (c as u32) >= 0x1D400 => 0.72,
+        _ if c.is_ascii() => 0.5,
         _ => 0.6,
     }
 }
@@ -504,6 +523,8 @@ fn space_between(left: Class, right: Class, script: bool) -> f32 {
 struct Engine {
     /// Counter for `\left...\right` pairs, to match `\middle`s.
     next_owner: usize,
+    /// Glyph widths for the chosen font.
+    metrics: &'static FontMetrics,
 }
 
 const LIMIT_UNDER: &[&str] = &["lim", "liminf", "limsup", "max", "min", "sup", "inf", "det", "gcd", "Pr"];
@@ -673,6 +694,12 @@ impl Engine {
     // ─── Text ──
 
     fn text(&mut self, t: &str, span: Span, st: &Style) -> LBox {
+        self.text_run(t, span, st, true)
+    }
+
+    /// Lay out a run of characters. `math` adds the extra room math italic
+    /// letters need; prose in `\text{}` doesn't get it.
+    fn text_run(&mut self, t: &str, span: Span, st: &Style, math: bool) -> LBox {
         if t.is_empty() {
             return LBox::empty();
         }
@@ -713,7 +740,7 @@ impl Engine {
                 None => (c, is_math_italic(c)),
             };
             italic_run |= italic;
-            let w = char_width(c, italic) * if family == Some("monospace") { 1.2 } else { 1.0 };
+            let w = char_width(self.metrics, c, italic, math) * if family == Some("monospace") { 1.2 } else { 1.0 };
             let (a, d) = char_extent(c);
             chars.push((shown, x * st.scale));
             x += w;
@@ -751,7 +778,7 @@ impl Engine {
             _ => Some(MathFontKind::Roman),
         };
         let inner = Style { font, ..st.clone() };
-        let mut b = self.text(t, span, &inner);
+        let mut b = self.text_run(t, span, &inner, false);
         b.asc = b.asc.max(0.68 * st.scale);
         b
     }

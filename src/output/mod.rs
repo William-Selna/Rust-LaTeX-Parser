@@ -18,6 +18,8 @@ mod latex;
 mod mathml;
 #[cfg(feature = "svg")]
 mod svg;
+#[cfg(feature = "svg")]
+mod svg_fonts;
 #[cfg(feature = "unicode")]
 mod unicode;
 
@@ -26,7 +28,7 @@ pub use latex::to_latex;
 #[cfg(feature = "mathml")]
 pub use mathml::to_mathml;
 #[cfg(feature = "svg")]
-pub use svg::{to_svg, SvgOptions};
+pub use svg::{to_svg, SvgFont, SvgOptions};
 #[cfg(feature = "unicode")]
 pub use unicode::to_unicode;
 

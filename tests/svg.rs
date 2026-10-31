@@ -194,3 +194,36 @@ fn deep_input_renders() {
         assert_valid(&svg(&input));
     }
 }
+
+#[test]
+fn fonts_change_family_and_widths() {
+    use rust_latex_parser::SvgFont;
+    let tree = parse_equation("a + b = c");
+    let render = |font| to_svg(&tree, &SvgOptions { font, ..SvgOptions::default() });
+    let times = render(SvgFont::Times);
+    let cm = render(SvgFont::ComputerModern);
+    let dejavu = render(SvgFont::DejaVuSerif);
+    assert!(times.contains("font-family=\"&#39;Times") || times.contains("font-family=\"'Times"));
+    assert!(cm.contains("CMU Serif"));
+    assert!(dejavu.contains("DejaVu Serif"));
+    // Computer Modern's + and = are wider than Times', DejaVu's wider still.
+    assert!(size(&cm).0 > size(&times).0);
+    assert!(size(&dejavu).0 > size(&cm).0);
+    for font in [SvgFont::StixTwo, SvgFont::NotoSerif, SvgFont::Libertinus] {
+        assert_valid(&render(font));
+    }
+}
+
+#[test]
+fn font_family_override() {
+    let tree = parse_equation("x");
+    let out = to_svg(&tree, &SvgOptions { font_family: Some("MyFont".into()), ..SvgOptions::default() });
+    assert!(out.contains("font-family=\"MyFont\""));
+}
+
+#[test]
+fn spaces_in_text_are_not_emitted() {
+    // SVG collapses whitespace, which would shift explicit glyph positions.
+    let out = svg(r"\text{a  b}");
+    assert!(out.contains(">ab</text>"), "{}", out);
+}

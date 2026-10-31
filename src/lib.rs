@@ -127,7 +127,7 @@ pub use output::to_mathml;
 #[cfg(any(feature = "mathml", feature = "svg"))]
 pub use output::MathDisplay;
 #[cfg(feature = "svg")]
-pub use output::{to_svg, SvgOptions};
+pub use output::{to_svg, SvgFont, SvgOptions};
 #[cfg(feature = "unicode")]
 pub use output::to_unicode;
 pub use parser::parse_equation;
