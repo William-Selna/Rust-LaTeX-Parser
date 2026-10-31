@@ -7,7 +7,7 @@ LaTeX math parser for Rust. Takes a string, gives you an AST. No dependencies.
 
 ```toml
 [dependencies]
-rust-latex-parser = { git = "https://github.com/William-Selna/Rust-LaTeX-Parser" }
+rust-latex-parser = "0.1"
 ```
 
 ## Usage
@@ -29,7 +29,9 @@ You get back an `EqNode` tree. Render it, convert it, inspect it — that part's
 
 ## What it handles
 
-Fractions (`\frac{a}{b}`, `a/b`), roots (`\sqrt{x}`), super/subscripts, matrices, cases, big operators with limits (`\sum`, `\int`, `\prod`), trig and log functions, accents (`\hat`, `\vec`, `\bar`), `\left...\right` delimiters, math fonts (`\mathbb`, `\mathcal`, etc.), binomials, over/underbraces, stacked relations, and 130+ symbols (Greek, arrows, set theory, relations, the usual).
+Fractions (`\frac{a}{b}`, `\dfrac`, `\tfrac`, `a/b`, `{a \over b}`), roots (`\sqrt{x}`), super/subscripts, matrices (including `smallmatrix`), cases (and `dcases`), big operators with limits (`\sum`, `\int`, `\prod`, `\bigcup`, `\bigoplus`, ..., with `\limits`/`\nolimits`), trig and log functions, custom operators (`\operatorname{rank}`), `\bmod`/`\pmod`, accents (`\hat`, `\vec`, `\bar`, `\widehat`, `\overrightarrow`), `\left...\middle...\right` with any delimiter (`\{`, `\langle`, `\lfloor`, `\|`, ...), math fonts (`\mathbb`, `\mathcal`, `\mathscr`, etc.), styled text (`\textbf`, `\mbox`), binomials, over/underbraces, stacked relations, extensible arrows (`\xrightarrow[below]{above}`), negation (`\not\in` → `∉`), spacing (`\hspace{1em}`, `\mkern3mu`), and 270+ symbols (Greek, arrows, set theory, relations and their negations, the usual).
+
+Purely presentational commands with no output of their own (`\displaystyle`, `\nonumber`, `\label{...}`) are accepted and skipped.
 
 You can also skip backslashes for common stuff — `pi` works, `sqrt(x)` works, `int_0^1` works. Parens after barewords act as grouping, so `sqrt(x+1)` grabs the whole `x+1`.
 
@@ -75,7 +77,7 @@ latex_to_unicode("garbage");    // None
 
 ## Error handling
 
-It doesn't error. Bad input gives you a best-effort tree — unmatched braces get skipped, unknown commands turn into text nodes. I needed this for a live editor where the input is always half-finished.
+It doesn't error. Bad input gives you a best-effort tree, and nothing you type is thrown away: unknown commands, unknown environments, and stray `}`, `&`, `\\` or `\end{...}` all come back as text nodes, and parsing carries on after them. An environment left open inside a group (e.g. `\frac{\begin{pmatrix} a}{b}`) closes at that group's `}`. I needed this for a live editor where the input is always half-finished.
 
 ## Tests
 
@@ -83,7 +85,7 @@ It doesn't error. Bad input gives you a best-effort tree — unmatched braces ge
 cargo test
 ```
 
-95 tests — parser correctness, adversarial input (deep nesting, emoji, 10k tokens), real-world expressions (quadratic formula, Gaussian integral, Schrodinger, Maxwell), Greek alphabet coverage.
+148 tests — parser correctness, adversarial input (deep nesting, emoji, 10k tokens), a randomized check over 5,000 generated malformed inputs that no content is ever dropped, real-world expressions (quadratic formula, Gaussian integral, Schrodinger, Maxwell), Greek alphabet coverage, and the newly supported commands.
 
 ## License
 

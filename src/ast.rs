@@ -100,7 +100,9 @@ pub enum EqNode {
     /// optional subscript limit.
     ///
     /// These render as upright text (not italic), with the limit below when
-    /// present. Produced by `\lim_{x \to 0}` or barewords like `sin`, `cos`.
+    /// present. Produced by `\lim_{x \to 0}`, barewords like `sin`, `cos`,
+    /// and custom operators via `\operatorname{rank}`. `\bmod` and `\pmod`
+    /// also use a `Limit` named `"mod"`.
     Limit {
         name: String,
         lower: Option<Box<EqNode>>,
@@ -114,28 +116,33 @@ pub enum EqNode {
 
     /// Math font override for a subexpression.
     ///
-    /// Produced by `\mathbb{R}`, `\mathbf{v}`, `\mathcal{F}`, etc.
+    /// Produced by `\mathbb{R}`, `\mathbf{v}`, `\mathcal{F}`, etc. Styled
+    /// text commands (`\textbf`, `\textsf`, `\texttt`) produce a `MathFont`
+    /// wrapping a [`EqNode::TextBlock`].
     /// See [`MathFontKind`] for the supported font families.
     MathFont { kind: MathFontKind, content: Box<EqNode> },
 
     /// Content wrapped in stretchy delimiters.
     ///
     /// Produced by `\left( ... \right)`. The `left` and `right` strings are
-    /// the delimiter characters (e.g. `"("` and `")"`). An invisible delimiter
-    /// (`\left.` or `\right.`) produces an empty string.
+    /// the delimiter characters (e.g. `"("` and `")"`). Command delimiters are
+    /// converted to Unicode: `\left\{` gives `"{"`, `\left\langle` gives `"⟨"`,
+    /// `\left\|` gives `"‖"`. An invisible delimiter (`\left.` or `\right.`)
+    /// produces an empty string.
     Delimited { left: String, right: String, content: Box<EqNode> },
 
     /// Matrix or matrix-like environment.
     ///
-    /// Produced by `\begin{pmatrix}`, `\begin{bmatrix}`, etc.
+    /// Produced by `\begin{pmatrix}`, `\begin{bmatrix}`, `\begin{smallmatrix}`, etc.
     /// Each inner `Vec<EqNode>` is one row, each `EqNode` in a row is one cell.
     /// See [`MatrixKind`] for the delimiter styles.
     Matrix { kind: MatrixKind, rows: Vec<Vec<EqNode>> },
 
     /// Piecewise / cases environment.
     ///
-    /// Produced by `\begin{cases} ... \end{cases}`. Each row is a
-    /// `(value, optional_condition)` pair. The condition comes after `&`.
+    /// Produced by `\begin{cases} ... \end{cases}` (or `dcases`). Each row
+    /// is a `(value, optional_condition)` pair. The condition comes after `&`;
+    /// any further `&`-separated cells are kept in the condition.
     Cases { rows: Vec<(EqNode, Option<EqNode>)> },
 
     /// Binomial coefficient. Rendered as a stacked pair in parentheses.
@@ -152,14 +159,16 @@ pub enum EqNode {
     /// One expression stacked above or below another.
     ///
     /// Produced by `\overset{def}{=}` (over=true), `\underset{lim}{=}`
-    /// (over=false), or `\stackrel{above}{base}` (over=true).
+    /// (over=false), or `\stackrel{above}{base}` (over=true). Extensible
+    /// arrows like `\xrightarrow[below]{above}` are built from nested
+    /// `StackRel` nodes around the arrow symbol.
     StackRel { base: Box<EqNode>, annotation: Box<EqNode>, over: bool },
 }
 
 /// The kind of accent mark in an [`EqNode::Accent`] node.
 #[derive(Debug, Clone, Copy)]
 pub enum AccentKind {
-    /// `\hat{x}` — circumflex above.
+    /// `\hat{x}` or `\widehat{xy}` — circumflex above.
     Hat,
     /// `\bar{x}` or `\overline{x}` — horizontal bar above.
     Bar,
@@ -167,35 +176,35 @@ pub enum AccentKind {
     Dot,
     /// `\ddot{x}` — double dot (diaeresis) above.
     DoubleDot,
-    /// `\tilde{x}` — tilde above.
+    /// `\tilde{x}` or `\widetilde{xy}` — tilde above.
     Tilde,
-    /// `\vec{v}` — right arrow above.
+    /// `\vec{v}` or `\overrightarrow{AB}` — right arrow above.
     Vec,
 }
 
 /// The font family in a [`EqNode::MathFont`] node.
 #[derive(Debug, Clone, Copy)]
 pub enum MathFontKind {
-    /// `\mathbf{...}` — bold.
+    /// `\mathbf{...}` or `\textbf{...}` — bold.
     Bold,
     /// `\mathbb{...}` — double-struck / blackboard bold.
     Blackboard,
-    /// `\mathcal{...}` — calligraphic / script.
+    /// `\mathcal{...}` or `\mathscr{...}` — calligraphic / script.
     Calligraphic,
     /// `\mathrm{...}` — upright roman.
     Roman,
     /// `\mathfrak{...}` — Fraktur / blackletter.
     Fraktur,
-    /// `\mathsf{...}` — sans-serif.
+    /// `\mathsf{...}` or `\textsf{...}` — sans-serif.
     SansSerif,
-    /// `\mathtt{...}` — monospace / typewriter.
+    /// `\mathtt{...}` or `\texttt{...}` — monospace / typewriter.
     Monospace,
 }
 
 /// The delimiter style for a [`EqNode::Matrix`] node.
 #[derive(Debug, Clone, Copy)]
 pub enum MatrixKind {
-    /// `\begin{matrix}` — no delimiters.
+    /// `\begin{matrix}` or `\begin{smallmatrix}` — no delimiters.
     Plain,
     /// `\begin{pmatrix}` — parentheses `( )`.
     Paren,
