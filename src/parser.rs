@@ -939,11 +939,12 @@ impl EqParser {
             return self.parse_postfix(group);
         }
         let first = self.parse_atom();
-        let mut parts = vec![self.parse_postfix(first)];
+        let mut parts = Vec::new();
+        push_node(&mut parts, self.parse_postfix(first));
         while self.continues_run() {
             let atom = self.parse_atom();
             let node = self.parse_postfix(atom);
-            parts.push(node);
+            push_node(&mut parts, node);
         }
         finish_nodes(parts, self.here())
     }
@@ -1014,7 +1015,18 @@ impl EqParser {
             }
             return inner;
         }
-        self.parse_atom()
+        self.parse_arg_atom()
+    }
+
+    /// An atom used as an argument (`\hat x`, `x^+`, `\frac+a`). A lone
+    /// binary operator has no left operand there, so it's a unary sign, just
+    /// as it would be inside `{...}`.
+    fn parse_arg_atom(&mut self) -> Node {
+        let mut node = self.parse_atom();
+        if let EqNode::Op { symbol, kind: OpKind::Binary } = &node.kind {
+            node.kind = EqNode::Text(symbol.clone());
+        }
+        node
     }
 
     /// Parse `( ... )` and split the contents at top-level commas, for
@@ -1111,7 +1123,7 @@ impl EqParser {
         if self.peek() == Some('(') {
             return self.parse_group_atom();
         }
-        self.parse_atom()
+        self.parse_arg_atom()
     }
 
     /// The operand of a typed `√`: a `(...)` group or a single atom with
@@ -1735,7 +1747,7 @@ impl EqParser {
 
             // \overbrace{...}^{label}
             "overbrace" => {
-                let content = self.parse_atom();
+                let content = self.parse_arg_atom();
                 let mut label = None;
                 if self.peek_past_whitespace() == Some('^') {
                     self.skip_whitespace();
@@ -1747,7 +1759,7 @@ impl EqParser {
 
             // \underbrace{...}_{label}
             "underbrace" => {
-                let content = self.parse_atom();
+                let content = self.parse_arg_atom();
                 let mut label = None;
                 if self.peek_past_whitespace() == Some('_') {
                     self.skip_whitespace();
@@ -1816,7 +1828,7 @@ impl EqParser {
                     "bcancel" => EncloseKind::BackCancel,
                     _ => EncloseKind::XCancel,
                 };
-                let content = self.parse_atom();
+                let content = self.parse_arg_atom();
                 return EqNode::Enclose { kind, content: Box::new(content) };
             }
 
@@ -1824,7 +1836,7 @@ impl EqParser {
             // here it only applies to the following atom.
             "textcolor" | "color" => {
                 let color = self.parse_closed_brace_arg().unwrap_or_default();
-                let content = if name == "textcolor" { self.parse_group_atom() } else { self.parse_atom() };
+                let content = if name == "textcolor" { self.parse_group_atom() } else { self.parse_arg_atom() };
                 return EqNode::Color { color: color.trim().to_string(), content: Box::new(content) };
             }
 
@@ -1891,7 +1903,7 @@ impl EqParser {
             "boldsymbol" | "bm" | "pmb" => Some(MathFontKind::BoldItalic),
             _ => None,
         } {
-            let arg = self.parse_atom();
+            let arg = self.parse_arg_atom();
             return EqNode::MathFont { kind, content: Box::new(arg) };
         }
 
@@ -1914,7 +1926,7 @@ impl EqParser {
             "underline" => Some(AccentKind::Underline),
             _ => None,
         } {
-            let arg = self.parse_atom();
+            let arg = self.parse_arg_atom();
             return EqNode::Accent(Box::new(arg), kind);
         }
 

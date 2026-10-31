@@ -474,3 +474,70 @@ fn any_text_content_round_trips_exactly() {
         assert_eq!(parse_equation(&latex).kind, EqNode::TextBlock(content.clone()), "{:?} -> {}", content, latex);
     }
 }
+
+// ─── Fuzzer finds ───────────────────────────────────────────────────
+
+/// Minimised inputs from `cargo fuzz run parse` (see `fuzz/`), one per bug
+/// found. Each once panicked, hung, produced invalid XML or failed to
+/// settle when written back out as LaTeX.
+const FUZZ_FINDS: &[&str] = &[
+    // `\begin` / `\color` names must be properly closed braces.
+    r"\begin{{{",
+    r"\color{{{",
+    r"\color{n{{{{",
+    // An unclosed environment inside `\left` swallowed the `\right`.
+    "\\left\u{FFFD}\\begin{}",
+    "\\left\u{FFFD}\u{FFFD}[\\begin{aay}{cc|c \\hline 1 & 2 &y}\\right]",
+    // Unknown-command and letter delimiters merged with what followed.
+    r"\left\z{Pim",
+    r"\left\z{e\bmod n} x_i^2 < \infty \right\}",
+    r"\bigg r",
+    // A separator span fell outside its parent.
+    "\u{0}ul(,",
+    "\u{0}\u{0}norm(,\u{FFFD}",
+    // Literal commands in a root index and empty cells in unknown
+    // environments.
+    "sqrt[\\begin{",
+    "\\sqrt[\u{0}`\u{0}\\begin{k}",
+    "\\B+[\\sqrt[\u{FFFD}\u{0}`\u{0}\\begin{p\u{b}atrix}  & bc \\\\ d nd{pm\u{0}x}\u{FFFD}\\underset{x} + \\binom{n$}{k}",
+    // `\not` before a closing brace ate the brace, then a bracket argument
+    // looped forever.
+    r"{\not}",
+    r"\sqrt[{\not}]x",
+    // Escaped notation characters and a lone operator as an argument.
+    r"\∛_*",
+    "a\\ii\u{1}\\&\\∛_*\\ac{\\rcfrac\\erleftr\\ba\\su\u{FFFD}bi'gh\\\\",
+    r"\frac+a",
+    r"x^+ \hat- \sqrt*",
+    "\\)), \u{FFFD}, x \\in \\math v \\right\\rangle \\left. \\frac{df}{dx}x > 0 \\right\\} \\lflgle unorm(, v \\right\\ra}",
+];
+
+#[test]
+fn fuzzer_finds_stay_fixed() {
+    for input in FUZZ_FINDS {
+        let tree = parse_equation(input);
+        check_spans(input, &tree);
+        check_outputs(input, &tree);
+    }
+}
+
+#[cfg(feature = "latex")]
+#[test]
+fn characters_with_typed_meaning_stay_literal_in_text() {
+    // These mean something when typed (`√x`, `½`, `x²`, `∑`, `f′`, `ℝ`,
+    // `"words"`), so as plain text they have to be escaped on the way out.
+    for c in "√∛∜½¾⅞∑∏∫∮⋃⨁⋀²³⁴ⁿ⁺₀₉ₐ′″‴\"𝐱ℝ𝔤".chars() {
+        let tree: Node = EqNode::Text(c.to_string()).into();
+        let latex = rust_latex_parser::to_latex(&tree);
+        assert_eq!(parse_equation(&latex).kind, tree.kind, "{:?} -> {}", c, latex);
+    }
+}
+
+#[cfg(feature = "latex")]
+#[test]
+fn lone_operator_argument_is_a_sign() {
+    // `x^+` reads as `x^{+}`: with nothing on its left, `+` is a sign.
+    for (a, b) in [(r"x^+", r"x^{+}"), (r"\frac+a", r"\frac{+}{a}"), (r"\hat-", r"\hat{-}"), (r"x_*", r"x_{*}")] {
+        assert_eq!(parse_equation(a), parse_equation(b), "{} vs {}", a, b);
+    }
+}

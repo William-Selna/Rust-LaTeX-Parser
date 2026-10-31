@@ -452,6 +452,12 @@ impl Writer {
                     self.out.push(c);
                 }
                 '\\' => self.command("backslash"),
+                // Characters the parser reads as notation when typed (`√`,
+                // `½`, `∑`, `²`, `′`, `ℝ`, `"`) are escaped to stay literal.
+                _ if typed_notation(c) => {
+                    self.emit("\\");
+                    self.out.push(c);
+                }
                 // As text (not an operator), `⊥` is `\bot`, not `\perp`.
                 '\u{22A5}' => self.command("bot"),
                 _ => match unicode_to_latex(c) {
@@ -556,6 +562,15 @@ impl Writer {
         self.out.push_str(env);
         self.out.push('}');
     }
+}
+
+/// Whether the parser gives this character a meaning when typed raw.
+fn typed_notation(c: char) -> bool {
+    matches!(c, '√' | '∛' | '∜' | '"' | '′' | '″' | '‴')
+        || matches!(c, '½' | '⅓' | '⅔' | '¼' | '¾' | '⅕' | '⅖' | '⅗' | '⅘' | '⅙' | '⅚' | '⅐' | '⅛' | '⅜' | '⅝' | '⅞' | '⅑' | '⅒')
+        || matches!(c, '∑' | '∏' | '∐' | '∫' | '∬' | '∭' | '⨌' | '∮' | '∯' | '∰' | '⋃' | '⋂' | '⨁' | '⨂' | '⨀' | '⨄' | '⨆' | '⋁' | '⋀')
+        || matches!(c, '¹' | '²' | '³' | '\u{2070}'..='\u{209C}' | 'ᵢ' | 'ⱼ' | 'ᵣ' | 'ᵤ' | 'ᵥ')
+        || crate::style::unstyle_char(c).is_some()
 }
 
 fn is_single_char(node: &Node) -> bool {
