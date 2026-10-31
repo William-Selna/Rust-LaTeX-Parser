@@ -11,6 +11,25 @@ Built for equation editors in rich-text apps, where the input is half-finished m
 rust-latex-parser = "0.2"
 ```
 
+### Features
+
+Each output format is a cargo feature, all on by default:
+
+| Feature | Adds |
+|---|---|
+| `latex` | `to_latex` |
+| `mathml` | `to_mathml` |
+| `unicode` | `to_unicode` |
+| `svg` | `to_svg`, `SvgOptions`, `SvgFont` (also turns on `unicode`) |
+
+The parser, the tree, source spans and the symbol lookups are always there. If that's all you need, turn the rest off; the crate builds about a third faster and half the size:
+
+```toml
+rust-latex-parser = { version = "0.2", default-features = false }
+# or just the formats you use:
+rust-latex-parser = { version = "0.2", default-features = false, features = ["mathml"] }
+```
+
 Upgrading from 0.1? See [CHANGELOG.md](CHANGELOG.md). The short version: `parse_equation` returns a `Node`, so `match tree.kind` instead of `match tree`; add a `_ =>` arm to matches on `EqNode`; and expect `Op` nodes where you used to get `Space` padding around operators.
 
 ## Usage
@@ -100,7 +119,18 @@ Left to LaTeX because they're ambiguous: `n!=1` (n factorial equals 1, not "not 
 
 For valid input, `parse_equation(&to_latex(&tree))` gives back the same tree.
 
-SVG layout uses built-in Times metrics and draws brackets, roots, fraction bars and big operators as paths, so it needs no font files and looks consistent everywhere; the default font is Times-compatible to match. `SvgOptions` sets the size, display or inline style, colour (default `currentColor`), font family, and optional `data-span` attributes that map each glyph back to the input.
+SVG layout draws brackets, roots, fraction bars and big operators as paths, and places letters using built-in width tables measured from real fonts, so it needs no font files at render time. Pick the font the SVG will be displayed with:
+
+| `SvgFont` | Font | Notes |
+|---|---|---|
+| `Times` (default) | Times New Roman, or Liberation Serif / Nimbus Roman | Available almost everywhere |
+| `StixTwo` | STIX Two Text | Times-like, made for scientific publishing |
+| `ComputerModern` | CMU Serif / Latin Modern Roman | The classic LaTeX look |
+| `NotoSerif` | Noto Serif | Default serif on Android and many Linux systems |
+| `DejaVuSerif` | DejaVu Serif | Common Linux default |
+| `Libertinus` | Libertinus Serif | Popular in academic publishing |
+
+With the matching font available (installed, or loaded as a web font), every glyph lands within 0.01 em of where the layout put it. `SvgOptions` also sets the size, display or inline style, colour (default `currentColor`), an optional CSS font-family override, and optional `data-span` attributes that map each glyph back to the input.
 
 MathML renders best with an OpenType math font; browsers fall back to the system one (Cambria Math on Windows, STIX Two Math on macOS). For consistent results everywhere, load a math web font such as STIX Two Math or Latin Modern Math and set `math { font-family: ... }`.
 
@@ -166,7 +196,7 @@ It doesn't error, and it doesn't crash: nesting deeper than any real equation (4
 cargo test
 ```
 
-247 tests — parser correctness, adversarial input (5,000-level nesting, emoji, 10k tokens), a randomized check over 5,000 generated malformed inputs that no content is ever dropped, plain-notation input and the LaTeX-wins rule, source spans (in bounds, on character boundaries and nested inside their parents, over 3,000 random inputs), LaTeX round-tripping (exact for valid input, a fixed point for 3,000 random malformed inputs), well-formed MathML and SVG, and real-world expressions (quadratic formula, Gaussian integral, Schrodinger, Maxwell).
+251 tests — parser correctness, adversarial input (5,000-level nesting, emoji, 10k tokens), a randomized check over 5,000 generated malformed inputs that no content is ever dropped, plain-notation input and the LaTeX-wins rule, source spans (in bounds, on character boundaries and nested inside their parents, over 3,000 random inputs), LaTeX round-tripping (exact for valid input, a fixed point for 3,000 random malformed inputs), well-formed MathML and SVG, and real-world expressions (quadratic formula, Gaussian integral, Schrodinger, Maxwell).
 
 ## License
 

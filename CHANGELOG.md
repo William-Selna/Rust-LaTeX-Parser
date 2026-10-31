@@ -108,6 +108,9 @@ reading, LaTeX wins):
 - `to_unicode`: readable plain text (`x² + √(y + 1)`).
 - `to_svg` with `SvgOptions`: standalone SVG from a built-in layout
   engine.
+  - Width tables measured from six fonts (`SvgFont::Times`, `StixTwo`,
+    `ComputerModern`, `NotoSerif`, `DejaVuSerif`, `Libertinus`). Every glyph
+    lands within 0.01 em of its laid-out position when that font is used.
   - Uses Times metrics, so it needs no font files.
   - Brackets, roots, big operators and accents are drawn as vector paths.
   - Includes baseline alignment for inline use and a `<title>` for screen
@@ -128,6 +131,12 @@ reading, LaTeX wins):
 - Fonts: `\mathit`, `\mathnormal`, `\textit`, `\emph` and `\textsl`
   (`Italic`); `\boldsymbol`, `\bm` and `\pmb` (`BoldItalic`).
 - `\perp` is a relation. `\not` negates `⊢ ⊨ ⊑ ⊒ ≍` too.
+
+**Cargo features:** each output format is a feature: `latex`, `mathml`,
+`unicode`, and `svg` (which turns on `unicode`). All are on by default.
+The parser, tree, spans and symbol lookups are always available, so
+`default-features = false` gives just the parser (about a third faster to
+build and half the size).
 
 **API:**
 - `unicode_to_latex`, the reverse symbol lookup.
