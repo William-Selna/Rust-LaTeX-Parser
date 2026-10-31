@@ -141,7 +141,8 @@ impl Lcg {
 /// Fragments that exercise every recovery path. Content characters are
 /// limited to `xyz123` so they can't accidentally combine into a bareword
 /// like `pi` or a dimension like `1em`. Fragments starting with `\` are
-/// commands; any of those letters inside them aren't counted as content.
+/// commands; any of those letters inside them aren't counted as content
+/// (and likewise for function words like `text(`).
 const FRAGMENTS: &[&str] = &[
     "x", "y", "z", "1", "2", "3", "x", "y", "12", " ", "  ",
     "{", "}", "}", "&", "&", "\\\\", "(", ")", "[", "]", "^", "_", "'", "+", "-", "/", "=",
@@ -154,6 +155,8 @@ const FRAGMENTS: &[&str] = &[
     "\\substack{", "\\operatorname{", "\\text{", "\\boxed", "\\hat", "\\mathbb",
     "\\sum", "\\int", "\\lim", "\\limits", "\\displaystyle", "\\binom", "\\overbrace",
     "\\underbrace", "\\xrightarrow", "\\alpha", "\\in", "\\,", "\\",
+    // Natural-input forms
+    "<=", "->", "=>", "+/-", "abs(", "root(", "text(", "hat(", "\"", ",", "√", "∛", "²", "₁", "½", "′", "∑",
 ];
 
 fn content_counts(s: &str) -> [usize; 6] {
@@ -176,7 +179,9 @@ fn random_inputs_never_drop_content() {
         let tree = parse_equation(&input);
         // Only count content we inserted, not letters inside command or
         // environment names (e.g. the `x` in `pmatrix`).
-        let content: String = fragments.iter().filter(|f| !f.starts_with('\\')).copied().collect();
+        // Function-style words like `text(` are syntax too.
+        let is_syntax = |f: &&str| f.starts_with('\\') || (f.len() > 1 && f.ends_with('('));
+        let content: String = fragments.iter().filter(|f| !is_syntax(f)).copied().collect();
         let expected = content_counts(&content);
         let actual = content_counts(&all_text(&tree));
         for i in 0..6 {
@@ -206,7 +211,46 @@ fn every_top_level_char_survives_plain_input() {
 
 #[test]
 fn deeply_nested_environments_terminate() {
+    let input = "\\begin{pmatrix}".repeat(30) + "x" + &"\\end{pmatrix}".repeat(30);
+    let node = parse_equation(&input);
+    assert!(matches!(node.kind, EqNode::Matrix { .. }));
+}
+
+#[test]
+fn nesting_beyond_the_limit_is_kept_as_text() {
+    // Past the nesting limit the parser stops building structure, but
+    // nothing is dropped and the outer structure is still there.
     let input = "\\begin{pmatrix}".repeat(100) + "x" + &"\\end{pmatrix}".repeat(100);
     let node = parse_equation(&input);
-    assert!(matches!(node, EqNode::Matrix { .. }));
+    match &node.kind {
+        EqNode::Seq(parts) => assert!(matches!(parts[0].kind, EqNode::Matrix { .. })),
+        other => panic!("{:?}", other),
+    }
+    assert!(all_text(&node).contains('x'));
+}
+
+#[test]
+fn extremely_deep_input_does_not_overflow_the_stack() {
+    let inputs = [
+        "{".repeat(5000) + "x" + &"}".repeat(5000),
+        "\\begin{pmatrix}".repeat(5000) + "x" + &"\\end{pmatrix}".repeat(5000),
+        "\\left(".repeat(5000) + "x" + &"\\right)".repeat(5000),
+        "sqrt(".repeat(5000) + "x",
+        "x^{".repeat(5000) + "2",
+        "\\color{red}a".repeat(5000),
+        "a \\over ".repeat(5000) + "b",
+    ];
+    // Test threads have a 2 MB stack.
+    for input in inputs {
+        let node = parse_equation(&input);
+        #[cfg(feature = "latex")]
+        let _ = rust_latex_parser::to_latex(&node);
+        #[cfg(feature = "mathml")]
+        let _ = rust_latex_parser::to_mathml(&node, rust_latex_parser::MathDisplay::Block);
+        #[cfg(feature = "unicode")]
+        let _ = rust_latex_parser::to_unicode(&node);
+        #[cfg(feature = "svg")]
+        let _ = rust_latex_parser::to_svg(&node, &rust_latex_parser::SvgOptions::default());
+        let _ = node;
+    }
 }

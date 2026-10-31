@@ -1,23 +1,24 @@
 //! Shared helpers for integration tests.
 #![allow(dead_code)]
 
-use rust_latex_parser::{parse_equation, EqNode};
+use rust_latex_parser::{parse_equation, EqNode, Node};
 
 /// Render a tree as a compact S-expression, ignoring spacing so tests can
 /// focus on structure. Whitespace-only text and `Space` nodes are dropped
 /// and single-element sequences are unwrapped.
-pub fn sx(node: &EqNode) -> String {
-    fn opt(n: &Option<Box<EqNode>>) -> String {
+pub fn sx(node: &Node) -> String {
+    fn opt(n: &Option<Box<Node>>) -> String {
         n.as_ref().map(|n| sx(n)).unwrap_or_else(|| "_".to_string())
     }
-    fn rows(rows: &[Vec<EqNode>]) -> String {
+    fn rows(rows: &[Vec<Node>]) -> String {
         rows.iter()
             .map(|r| format!("[{}]", r.iter().map(sx).collect::<Vec<_>>().join(" ")))
             .collect::<Vec<_>>()
             .join(" ")
     }
-    match node {
+    match &node.kind {
         EqNode::Text(s) => s.clone(),
+        EqNode::Op { symbol, .. } => symbol.clone(),
         EqNode::Space(_) => String::new(),
         EqNode::Seq(nodes) => {
             let parts: Vec<String> = nodes
@@ -36,12 +37,15 @@ pub fn sx(node: &EqNode) -> String {
         EqNode::SupSub(b, p, s) => format!("(supsub {} {} {})", sx(b), sx(p), sx(s)),
         EqNode::Frac(n, d) => format!("(frac {} {})", sx(n), sx(d)),
         EqNode::Sqrt(c) => format!("(sqrt {})", sx(c)),
+        EqNode::Root { index, content } => format!("(root {} {})", sx(index), sx(content)),
         EqNode::BigOp { symbol, lower, upper } => format!("(bigop {} {} {})", symbol, opt(lower), opt(upper)),
         EqNode::Accent(c, k) => format!("(accent {:?} {})", k, sx(c)),
         EqNode::Limit { name, lower } => format!("(limit {} {})", name, opt(lower)),
         EqNode::TextBlock(s) => format!("(text {:?})", s),
         EqNode::MathFont { kind, content } => format!("(font {:?} {})", kind, sx(content)),
         EqNode::Delimited { left, right, content } => format!("(delim {:?} {:?} {})", left, right, sx(content)),
+        EqNode::SizedDelim { delim, size } => format!("(sized {} {:?})", size, delim),
+        EqNode::Middle(d) => format!("(middle {:?})", d),
         EqNode::Matrix { kind, rows: r } => format!("(matrix {:?} {})", kind, rows(r)),
         EqNode::Cases { rows: r } => format!(
             "(cases {})",
@@ -50,9 +54,15 @@ pub fn sx(node: &EqNode) -> String {
                 .collect::<Vec<_>>()
                 .join(" ")
         ),
+        EqNode::Align { rows: r } => format!("(align {})", rows(r)),
+        EqNode::Gather { rows: r } => format!("(gather {})", r.iter().map(sx).collect::<Vec<_>>().join(" ")),
+        EqNode::Array { columns, rows: r, hlines } => format!("(array {:?} {:?} {})", columns, hlines, rows(r)),
         EqNode::Binom(a, b) => format!("(binom {} {})", sx(a), sx(b)),
         EqNode::Brace { content, label, over } => format!("(brace {} {} {})", over, sx(content), opt(label)),
         EqNode::StackRel { base, annotation, over } => format!("(stack {} {} {})", over, sx(base), sx(annotation)),
+        EqNode::Color { color, content } => format!("(color {} {})", color, sx(content)),
+        EqNode::Enclose { kind, content } => format!("(enclose {:?} {})", kind, sx(content)),
+        other => format!("{:?}", other),
     }
 }
 
@@ -63,16 +73,16 @@ pub fn p(input: &str) -> String {
 
 /// Concatenate every piece of visible text in the tree (text, symbols,
 /// operator names, delimiters, colors...), in no particular order.
-pub fn all_text(node: &EqNode) -> String {
+pub fn all_text(node: &Node) -> String {
     let mut out = String::new();
     collect(node, &mut out);
     out
 }
 
-fn collect(node: &EqNode, out: &mut String) {
-    let mut each = |n: &EqNode| collect(n, out);
-    match node {
-        EqNode::Text(s) | EqNode::TextBlock(s) => out.push_str(s),
+fn collect(node: &Node, out: &mut String) {
+    let mut each = |n: &Node| collect(n, out);
+    match &node.kind {
+        EqNode::Text(s) | EqNode::TextBlock(s) | EqNode::Op { symbol: s, .. } => out.push_str(s),
         EqNode::Space(_) => {}
         EqNode::Seq(v) => v.iter().for_each(each),
         EqNode::Sup(a, b) | EqNode::Sub(a, b) | EqNode::Frac(a, b) | EqNode::Binom(a, b) => {
@@ -84,7 +94,11 @@ fn collect(node: &EqNode, out: &mut String) {
             each(b);
             each(c);
         }
-        EqNode::Sqrt(c) | EqNode::Accent(c, _) | EqNode::MathFont { content: c, .. } => each(c),
+        EqNode::Sqrt(c) | EqNode::Accent(c, _) | EqNode::MathFont { content: c, .. } | EqNode::Enclose { content: c, .. } => each(c),
+        EqNode::Root { index, content } => {
+            each(index);
+            each(content);
+        }
         EqNode::BigOp { symbol, lower, upper } => {
             out.push_str(symbol);
             lower.iter().chain(upper.iter()).for_each(|n| collect(n, out));
@@ -98,7 +112,11 @@ fn collect(node: &EqNode, out: &mut String) {
             out.push_str(right);
             collect(content, out);
         }
-        EqNode::Matrix { rows, .. } => rows.iter().flatten().for_each(|n| collect(n, out)),
+        EqNode::SizedDelim { delim, .. } | EqNode::Middle(delim) => out.push_str(delim),
+        EqNode::Matrix { rows, .. } | EqNode::Align { rows } | EqNode::Array { rows, .. } => {
+            rows.iter().flatten().for_each(|n| collect(n, out))
+        }
+        EqNode::Gather { rows } => rows.iter().for_each(|n| collect(n, out)),
         EqNode::Cases { rows } => {
             for (v, c) in rows {
                 collect(v, out);
@@ -113,5 +131,10 @@ fn collect(node: &EqNode, out: &mut String) {
             collect(base, out);
             collect(annotation, out);
         }
+        EqNode::Color { color, content } => {
+            out.push_str(color);
+            collect(content, out);
+        }
+        other => panic!("all_text: unhandled node {:?}", other),
     }
 }
