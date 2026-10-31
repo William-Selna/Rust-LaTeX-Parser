@@ -196,7 +196,22 @@ It doesn't error, and it doesn't crash: nesting deeper than any real equation (4
 cargo test
 ```
 
-251 tests — parser correctness, adversarial input (5,000-level nesting, emoji, 10k tokens), a randomized check over 5,000 generated malformed inputs that no content is ever dropped, plain-notation input and the LaTeX-wins rule, source spans (in bounds, on character boundaries and nested inside their parents, over 3,000 random inputs), LaTeX round-tripping (exact for valid input, a fixed point for 3,000 random malformed inputs), well-formed MathML and SVG, and real-world expressions (quadratic formula, Gaussian integral, Schrodinger, Maxwell).
+266 tests — parser correctness, plain-notation input and the LaTeX-wins rule, a randomized check over 5,000 generated malformed inputs that no content is ever dropped, source spans (in bounds, on character boundaries and nested inside their parents), LaTeX round-tripping (exact for valid input and random trees, a fixed point for random malformed input), well-formed MathML and SVG, and real-world expressions (quadratic formula, Gaussian integral, Schrodinger, Maxwell).
+
+`tests/stress.rs` is the adversarial suite. It covers:
+- random Unicode and every one- and two-character input
+- every prefix of real expressions (what an editor sees as you type)
+- bounded tree depth however many times any fragment, or pair of fragments, repeats
+- a 1 MB paste
+- timing checks that parsing and all four outputs stay linear over 30 input shapes
+- determinism across threads
+- the minimised inputs that fuzzing found
+
+There is also a [`cargo fuzz`](https://github.com/rust-fuzz/cargo-fuzz) target. On arbitrary bytes, it checks span invariants, bounded depth, LaTeX round-trip stability, and well-formed MathML and SVG:
+
+```sh
+cargo +nightly fuzz run parse -- -dict=fuzz/latex.dict
+```
 
 ## License
 

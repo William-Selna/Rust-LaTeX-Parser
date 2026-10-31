@@ -146,6 +146,29 @@ build and half the size).
 - `PartialEq` on `EqNode` and related types. `Eq` and `Hash` on the
   fieldless kind enums.
 
+**Robustness:**
+- A `cargo fuzz` target (in `fuzz/`, not published) checks every output
+  format on arbitrary bytes, along with span invariants and LaTeX
+  round-trip stability. After the fixes below, it ran about 570,000
+  inputs (85 worker-minutes) with no crashes, hangs or out-of-memory
+  errors.
+- Parsing and every output run in linear time. A stress test checks
+  this on 30 input shapes up to 1 MB.
+- Fixed:
+  - `a/a/a/…` and `x^(x^(…` chains overflowed the stack.
+  - `to_latex` took cubic time on long runs of letters.
+  - NUL and other control characters made MathML and SVG output invalid
+    XML. They are now written as U+FFFD.
+  - Text containing `\`, `{` or `}` didn't round-trip through `to_latex`.
+  - Characters with a typed meaning (`√`, `½`, `²`, `∑`, `ℝ`, `"`) didn't
+    stay literal when escaped (`\√`).
+  - A lone operator as an argument (`x^+`, `\frac+a`) now parses like
+    its braced form, as a sign.
+  - Various malformed inputs made the parser hang or return wrong spans,
+    or made `to_latex` write LaTeX that read back differently: an
+    unclosed `\begin{` or `\color{` name, an unclosed environment inside
+    `\left…\right`, `\not}`, and `\hspace{}` with no dimension.
+
 ## 0.1.1
 
 This is a bug-fix release with no API changes. Output only differs from
