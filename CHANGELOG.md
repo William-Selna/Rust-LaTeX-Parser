@@ -3,10 +3,14 @@
 ## 0.2.0
 
 Math input for equation editors whose users may not know LaTeX: plain
-notation alongside LaTeX, a tree that records meaning rather than layout,
-and LaTeX, MathML and Unicode output.
+notation alongside LaTeX, a tree that records meaning and source
+positions rather than layout, and LaTeX, MathML, SVG and Unicode output.
 
 ### Breaking changes
+
+- **Nodes carry source spans.** `parse_equation` returns a
+  `Node { kind: EqNode, span: Span }`, and all children are `Node`s.
+  `Span` holds byte offsets into the input. `Node` equality ignores spans.
 
 - **Operators are `Op` nodes.** `EqNode::Op { symbol, kind }` with
   `OpKind::{Binary, Relation}` replaces the `Space(4.0), Text(op),
@@ -26,6 +30,9 @@ and LaTeX, MathML and Unicode output.
   around an arrow `Op`, without `Space` padding.
 
 **To upgrade:**
+- Match on `node.kind` instead of `node`. Children are `Node`s, so
+  recursive code keeps the same shape. To build a tree by hand, convert
+  each `EqNode` with `.into()` (e.g. `EqNode::Text("x".into()).into()`).
 - Add a `_ =>` arm to each `match` on these enums.
 - Handle `Op` where you used to see `Space` + `Text` + `Space` around
   operators.
@@ -85,12 +92,28 @@ reading, LaTeX wins):
   `neq`, `leq`, `geq`, `subset(eq)`, `supset(eq)`, `notin`, `cdots`,
   `ldots`.
 
+**Editor support:**
+- `Node::span` on every node, `Node::children()` for generic traversal,
+  and `Node::node_at(offset)` to find the node under a cursor.
+- Parsing is about 15× faster on long input.
+- Nesting deeper than 48 levels is kept as plain text instead of being
+  recursed into, so no input can overflow the stack. 5,000 levels of
+  every construct parse and render on a 256 KB stack in release builds.
+
 **Output formats** (in the new `output` module):
 - `to_latex`: canonical LaTeX using standard commands only. For valid
   input it parses back to the same tree.
 - `to_mathml` with `MathDisplay::{Inline, Block}`: MathML Core for native
   browser rendering. Unknown commands are wrapped in `<merror>`.
 - `to_unicode`: readable plain text (`x² + √(y + 1)`).
+- `to_svg` with `SvgOptions`: standalone SVG from a built-in layout
+  engine.
+  - Uses Times metrics, so it needs no font files.
+  - Brackets, roots, big operators and accents are drawn as vector paths.
+  - Includes baseline alignment for inline use and a `<title>` for screen
+    readers.
+  - Optionally adds `data-span` attributes that map glyphs back to the
+    source.
 
 **Syntax:**
 - `align`, `gather` and `array` environments as above. `array` supports

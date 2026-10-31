@@ -2,7 +2,7 @@
 name = "rust-latex-parser"
 version = "0.2.0"
 edition = "2021"
-description = "Math input for equation editors: parses LaTeX or plain notation (sqrt(x)/2 <= abs(y)) into an AST and writes LaTeX, MathML or Unicode. Never fails on half-typed input. No dependencies."
+description = "Math input for equation editors: parses LaTeX or plain notation (sqrt(x)/2 <= abs(y)) into an AST with source spans and writes LaTeX, MathML, SVG or Unicode. Never fails or crashes on half-typed input. No dependencies."
 license = "MIT"
 repository = "https://github.com/William-Selna/Rust-LaTeX-Parser"
 keywords = ["latex", "math", "equation", "mathml", "parser"]

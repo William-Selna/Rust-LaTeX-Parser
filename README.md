@@ -1,6 +1,6 @@
 # Rust-LaTeX-Parser
 
-Math input for Rust. Takes what the user typed, whether that's LaTeX or plain notation like `sqrt(x)/2 <= abs(y)`, and gives you an AST. Then writes it back out as LaTeX, MathML or plain Unicode. No dependencies.
+Math input for Rust. Takes what the user typed, whether that's LaTeX or plain notation like `sqrt(x)/2 <= abs(y)`, and gives you an AST where every node knows where it came from. Then writes it back out as LaTeX, MathML, SVG or plain Unicode. No dependencies.
 
 Built for equation editors in rich-text apps, where the input is half-finished most of the time and the person typing may not know LaTeX.
 
@@ -11,21 +11,41 @@ Built for equation editors in rich-text apps, where the input is half-finished m
 rust-latex-parser = "0.2"
 ```
 
-Upgrading from 0.1? See [CHANGELOG.md](CHANGELOG.md). The short version: add a `_ =>` arm wherever you `match` on `EqNode`, and expect `Op` nodes where you used to get `Space` padding around operators.
+Upgrading from 0.1? See [CHANGELOG.md](CHANGELOG.md). The short version: `parse_equation` returns a `Node`, so `match tree.kind` instead of `match tree`; add a `_ =>` arm to matches on `EqNode`; and expect `Op` nodes where you used to get `Space` padding around operators.
 
 ## Usage
 
 ```rust
-use rust_latex_parser::{parse_equation, to_latex, to_mathml, to_unicode, MathDisplay};
+use rust_latex_parser::{parse_equation, to_latex, to_mathml, to_svg, to_unicode, MathDisplay, SvgOptions};
 
 let tree = parse_equation("x = (-b +/- sqrt(b^2 - 4ac))/(2a)");
 
 to_latex(&tree);   // x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}
 to_unicode(&tree); // x = (-b ± √(b² - 4ac))/2a
-to_mathml(&tree, MathDisplay::Block); // <math display="block">…</math>
+to_mathml(&tree, MathDisplay::Block);    // <math display="block">…</math>
+to_svg(&tree, &SvgOptions::default());   // <svg …>…</svg>
 ```
 
-Or walk the `EqNode` tree yourself and render it however you like.
+Or walk the tree yourself and render it however you like:
+
+```rust
+use rust_latex_parser::{parse_equation, EqNode};
+
+let input = r"a + \sqrt{x}";
+let tree = parse_equation(input);
+
+match &tree.kind {
+    EqNode::Seq(parts) => { /* a, +, √x */ }
+    _ => {}
+}
+
+// Every node knows where it came from (byte offsets into the input)...
+let sqrt = &tree.children()[2];
+assert_eq!(&input[sqrt.span.range()], r"\sqrt{x}");
+
+// ...so you can find what's under the cursor.
+let under_cursor = tree.node_at(10).unwrap(); // the `x`
+```
 
 ## Input
 
@@ -76,20 +96,25 @@ Left to LaTeX because they're ambiguous: `n!=1` (n factorial equals 1, not "not 
 | `to_latex(&tree)` | Storing canonical LaTeX; interop with KaTeX, MathJax and LaTeX. Only standard commands, so plain-notation input comes out as normal LaTeX. |
 | `to_mathml(&tree, display)` | Rendering in the browser with no JavaScript library. Targets [MathML Core](https://www.w3.org/TR/mathml-core/), which current Chrome, Edge, Firefox and Safari support. Unknown commands come out as `<merror>` so you can highlight them. |
 | `to_unicode(&tree)` | Alt text, the plain-text clipboard, search indexing: `x² + √(y + 1)`, `ℝⁿ`, `∑ᵢ₌₁ⁿ`. |
+| `to_svg(&tree, &options)` | Images: exports, thumbnails, PDFs, email, anywhere MathML isn't available. Self-contained, with baseline alignment for inline use and a text `<title>` for screen readers. |
 
 For valid input, `parse_equation(&to_latex(&tree))` gives back the same tree.
+
+SVG layout uses built-in Times metrics and draws brackets, roots, fraction bars and big operators as paths, so it needs no font files and looks consistent everywhere; the default font is Times-compatible to match. `SvgOptions` sets the size, display or inline style, colour (default `currentColor`), font family, and optional `data-span` attributes that map each glyph back to the input.
 
 MathML renders best with an OpenType math font; browsers fall back to the system one (Cambria Math on Windows, STIX Two Math on macOS). For consistent results everywhere, load a math web font such as STIX Two Math or Latin Modern Math and set `math { font-family: ... }`.
 
 ## The tree
 
-28 variants. `EqNode` is `#[non_exhaustive]`, so include a `_ =>` arm when matching; it derives `PartialEq` for easy comparisons.
+`parse_equation` returns a `Node`: its `kind` (an `EqNode`, below) and its `span` (byte offsets into the input). Children are `Node`s too. `node.children()` walks the tree in reading order, `node.node_at(offset)` finds the innermost node under a cursor, and `==` compares structure while ignoring spans.
+
+`EqNode` has 28 variants. It's `#[non_exhaustive]`, so include a `_ =>` arm when matching.
 
 ```rust
 EqNode::Text(String)                    // "x", "42", "α", "(" — and unary "-"
 EqNode::Op { symbol, kind }             // "+" Binary, "=" Relation, "≤", "→", ...
 EqNode::Space(f32)                      // explicit spacing only: \quad, \,, \hspace
-EqNode::Seq(Vec<EqNode>)                // horizontal sequence
+EqNode::Seq(Vec<Node>)                  // horizontal sequence
 EqNode::Sup(base, superscript)
 EqNode::Sub(base, subscript)
 EqNode::SupSub(base, sup, sub)
@@ -133,7 +158,7 @@ symbols().count();          // every command name and its character — for auto
 
 ## Error handling
 
-It doesn't error. Bad input gives you a best-effort tree, and nothing you type is thrown away: unknown commands, unknown environments, and stray `}`, `&`, `\\` or `\end{...}` all come back as text nodes, and parsing carries on after them. An environment left open inside a group (e.g. `\frac{\begin{pmatrix} a}{b}`) closes at that group's `}`, and an unclosed `"quote` runs to the end. I needed this for a live editor where the input is always half-finished.
+It doesn't error, and it doesn't crash: nesting deeper than any real equation (48 levels) is kept as plain text rather than recursed into, so pathological input can't overflow the stack. Bad input gives you a best-effort tree, and nothing you type is thrown away: unknown commands, unknown environments, and stray `}`, `&`, `\\` or `\end{...}` all come back as text nodes, and parsing carries on after them. An environment left open inside a group (e.g. `\frac{\begin{pmatrix} a}{b}`) closes at that group's `}`, and an unclosed `"quote` runs to the end. I needed this for a live editor where the input is always half-finished.
 
 ## Tests
 
@@ -141,7 +166,7 @@ It doesn't error. Bad input gives you a best-effort tree, and nothing you type i
 cargo test
 ```
 
-218 tests — parser correctness, adversarial input (deep nesting, emoji, 10k tokens), a randomized check over 5,000 generated malformed inputs that no content is ever dropped, plain-notation input and the LaTeX-wins rule, LaTeX round-tripping (exact for valid input, a fixed point for 3,000 random malformed inputs), well-formed MathML, and real-world expressions (quadratic formula, Gaussian integral, Schrodinger, Maxwell).
+247 tests — parser correctness, adversarial input (5,000-level nesting, emoji, 10k tokens), a randomized check over 5,000 generated malformed inputs that no content is ever dropped, plain-notation input and the LaTeX-wins rule, source spans (in bounds, on character boundaries and nested inside their parents, over 3,000 random inputs), LaTeX round-tripping (exact for valid input, a fixed point for 3,000 random malformed inputs), well-formed MathML and SVG, and real-world expressions (quadratic formula, Gaussian integral, Schrodinger, Maxwell).
 
 ## License
 

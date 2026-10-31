@@ -1,7 +1,8 @@
 //! # rust-latex-parser
 //!
-//! Math input for Rust: parse LaTeX *or* plain notation into an [`EqNode`]
-//! tree, then write it back out as LaTeX, MathML or Unicode text.
+//! Math input for Rust: parse LaTeX *or* plain notation into a tree of
+//! [`Node`]s, each knowing its source [`Span`], then write it back out as
+//! LaTeX, MathML, SVG or Unicode text.
 //!
 //! Built for equation editors in rich-text apps, where input is usually
 //! half-finished and the person typing may not know LaTeX. The parser never
@@ -81,8 +82,8 @@
 //! # Output
 //!
 //! See the [`output`] module: [`to_latex`] for canonical LaTeX,
-//! [`to_mathml`] for native browser rendering, and [`to_unicode`] for plain
-//! text.
+//! [`to_mathml`] for native browser rendering, [`to_svg`] for images, and
+//! [`to_unicode`] for plain text.
 
 pub mod ast;
 pub mod output;
